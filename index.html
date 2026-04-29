@@ -761,8 +761,224 @@
         10. app()           Alpine factory — state + method dispatch
        ============================================================ */
 
-    /* ===== 1. Sample datasets (filled by Steps 5-6) ===== */
-    const SAMPLES = {};
+    /* ===== 1. Sample datasets =====
+       Each entry:
+         { name, description, teaches, rows: [...], suggestedSpec, issues? }
+       suggestedSpec.{response, predictors, family} pre-fills the sidebar
+       on load so a single click takes the user from Sample picker to a
+       fitted model. Step 6 adds airquality / cars / iris_binary / pima. */
+    const SAMPLES = {
+
+      /* ---- 1. Anscombe's quartet --------------------------------
+         44 rows × 3 cols (long format: set / x / y). Famously, the four
+         (x, y) sets share identical mean(x), mean(y), var(x), var(y),
+         pearson(x,y), and OLS slope/intercept — yet the scatter plots
+         differ wildly. Pedagogical purpose: prove that diagnostic
+         PLOTS are mandatory; summary statistics alone deceive.
+         Reference: Anscombe (1973) "Graphs in Statistical Analysis." */
+      anscombe: {
+        name: "Anscombe's quartet",
+        description: "Four datasets with identical OLS summary stats but visibly different scatter plots.",
+        teaches: "Why diagnostic plots are mandatory — summary statistics can be identical for very different shapes.",
+        suggestedSpec: { response: "y", predictors: ["x"], family: "ols" },
+        rows: [
+          // Set 1 — clean linear
+          { set: 1, x: 10, y:  8.04 }, { set: 1, x:  8, y: 6.95 }, { set: 1, x: 13, y:  7.58 },
+          { set: 1, x:  9, y:  8.81 }, { set: 1, x: 11, y: 8.33 }, { set: 1, x: 14, y:  9.96 },
+          { set: 1, x:  6, y:  7.24 }, { set: 1, x:  4, y: 4.26 }, { set: 1, x: 12, y: 10.84 },
+          { set: 1, x:  7, y:  4.82 }, { set: 1, x:  5, y: 5.68 },
+          // Set 2 — curved (quadratic relationship)
+          { set: 2, x: 10, y:  9.14 }, { set: 2, x:  8, y: 8.14 }, { set: 2, x: 13, y:  8.74 },
+          { set: 2, x:  9, y:  8.77 }, { set: 2, x: 11, y: 9.26 }, { set: 2, x: 14, y:  8.10 },
+          { set: 2, x:  6, y:  6.13 }, { set: 2, x:  4, y: 3.10 }, { set: 2, x: 12, y:  9.13 },
+          { set: 2, x:  7, y:  7.26 }, { set: 2, x:  5, y: 4.74 },
+          // Set 3 — outlier shifts the fit
+          { set: 3, x: 10, y:  7.46 }, { set: 3, x:  8, y: 6.77 }, { set: 3, x: 13, y: 12.74 },
+          { set: 3, x:  9, y:  7.11 }, { set: 3, x: 11, y: 7.81 }, { set: 3, x: 14, y:  8.84 },
+          { set: 3, x:  6, y:  6.08 }, { set: 3, x:  4, y: 5.39 }, { set: 3, x: 12, y:  8.15 },
+          { set: 3, x:  7, y:  6.42 }, { set: 3, x:  5, y: 5.73 },
+          // Set 4 — single high-leverage point determines slope
+          { set: 4, x:  8, y:  6.58 }, { set: 4, x:  8, y: 5.76 }, { set: 4, x:  8, y:  7.71 },
+          { set: 4, x:  8, y:  8.84 }, { set: 4, x:  8, y: 8.47 }, { set: 4, x:  8, y:  7.04 },
+          { set: 4, x:  8, y:  5.25 }, { set: 4, x: 19, y: 12.50 }, { set: 4, x: 8, y:  5.56 },
+          { set: 4, x:  8, y:  7.91 }, { set: 4, x:  8, y: 6.89 },
+        ],
+      },
+
+      /* ---- 2. mtcars ---------------------------------------------
+         32 rows × 11 cols. Henderson & Velleman (1981), via R datasets.
+         Classic multiple regression teaching set; mild collinearity
+         between (cyl, disp, hp, wt). Suggested fit: mpg ~ wt + hp + cyl.
+         Variables:
+           mpg   miles per gallon       cyl  cylinders (4/6/8)
+           disp  displacement (cu in)   hp   gross horsepower
+           drat  rear axle ratio        wt   weight (1000 lbs)
+           qsec  1/4 mile time (s)      vs   engine: 0=V, 1=straight
+           am    transmission: 0=auto   gear forward gears
+           carb  carburetors                                          */
+      mtcars: {
+        name: "mtcars",
+        description: "1974 Motor Trend road tests of 32 cars (1973–74 models).",
+        teaches: "Classic multiple regression with mild multicollinearity (cyl/disp/wt move together).",
+        suggestedSpec: { response: "mpg", predictors: ["wt", "hp", "cyl"], family: "ols" },
+        rows: [
+          { mpg:21.0, cyl:6, disp:160.0, hp:110, drat:3.90, wt:2.620, qsec:16.46, vs:0, am:1, gear:4, carb:4 },
+          { mpg:21.0, cyl:6, disp:160.0, hp:110, drat:3.90, wt:2.875, qsec:17.02, vs:0, am:1, gear:4, carb:4 },
+          { mpg:22.8, cyl:4, disp:108.0, hp: 93, drat:3.85, wt:2.320, qsec:18.61, vs:1, am:1, gear:4, carb:1 },
+          { mpg:21.4, cyl:6, disp:258.0, hp:110, drat:3.08, wt:3.215, qsec:19.44, vs:1, am:0, gear:3, carb:1 },
+          { mpg:18.7, cyl:8, disp:360.0, hp:175, drat:3.15, wt:3.440, qsec:17.02, vs:0, am:0, gear:3, carb:2 },
+          { mpg:18.1, cyl:6, disp:225.0, hp:105, drat:2.76, wt:3.460, qsec:20.22, vs:1, am:0, gear:3, carb:1 },
+          { mpg:14.3, cyl:8, disp:360.0, hp:245, drat:3.21, wt:3.570, qsec:15.84, vs:0, am:0, gear:3, carb:4 },
+          { mpg:24.4, cyl:4, disp:146.7, hp: 62, drat:3.69, wt:3.190, qsec:20.00, vs:1, am:0, gear:4, carb:2 },
+          { mpg:22.8, cyl:4, disp:140.8, hp: 95, drat:3.92, wt:3.150, qsec:22.90, vs:1, am:0, gear:4, carb:2 },
+          { mpg:19.2, cyl:6, disp:167.6, hp:123, drat:3.92, wt:3.440, qsec:18.30, vs:1, am:0, gear:4, carb:4 },
+          { mpg:17.8, cyl:6, disp:167.6, hp:123, drat:3.92, wt:3.440, qsec:18.90, vs:1, am:0, gear:4, carb:4 },
+          { mpg:16.4, cyl:8, disp:275.8, hp:180, drat:3.07, wt:4.070, qsec:17.40, vs:0, am:0, gear:3, carb:3 },
+          { mpg:17.3, cyl:8, disp:275.8, hp:180, drat:3.07, wt:3.730, qsec:17.60, vs:0, am:0, gear:3, carb:3 },
+          { mpg:15.2, cyl:8, disp:275.8, hp:180, drat:3.07, wt:3.780, qsec:18.00, vs:0, am:0, gear:3, carb:3 },
+          { mpg:10.4, cyl:8, disp:472.0, hp:205, drat:2.93, wt:5.250, qsec:17.98, vs:0, am:0, gear:3, carb:4 },
+          { mpg:10.4, cyl:8, disp:460.0, hp:215, drat:3.00, wt:5.424, qsec:17.82, vs:0, am:0, gear:3, carb:4 },
+          { mpg:14.7, cyl:8, disp:440.0, hp:230, drat:3.23, wt:5.345, qsec:17.42, vs:0, am:0, gear:3, carb:4 },
+          { mpg:32.4, cyl:4, disp: 78.7, hp: 66, drat:4.08, wt:2.200, qsec:19.47, vs:1, am:1, gear:4, carb:1 },
+          { mpg:30.4, cyl:4, disp: 75.7, hp: 52, drat:4.93, wt:1.615, qsec:18.52, vs:1, am:1, gear:4, carb:2 },
+          { mpg:33.9, cyl:4, disp: 71.1, hp: 65, drat:4.22, wt:1.835, qsec:19.90, vs:1, am:1, gear:4, carb:1 },
+          { mpg:21.5, cyl:4, disp:120.1, hp: 97, drat:3.70, wt:2.465, qsec:20.01, vs:1, am:0, gear:3, carb:1 },
+          { mpg:15.5, cyl:8, disp:318.0, hp:150, drat:2.76, wt:3.520, qsec:16.87, vs:0, am:0, gear:3, carb:2 },
+          { mpg:15.2, cyl:8, disp:304.0, hp:150, drat:3.15, wt:3.435, qsec:17.30, vs:0, am:0, gear:3, carb:2 },
+          { mpg:13.3, cyl:8, disp:350.0, hp:245, drat:3.73, wt:3.840, qsec:15.41, vs:0, am:0, gear:3, carb:4 },
+          { mpg:19.2, cyl:8, disp:400.0, hp:175, drat:3.08, wt:3.845, qsec:17.05, vs:0, am:0, gear:3, carb:2 },
+          { mpg:27.3, cyl:4, disp: 79.0, hp: 66, drat:4.08, wt:1.935, qsec:18.90, vs:1, am:1, gear:4, carb:1 },
+          { mpg:26.0, cyl:4, disp:120.3, hp: 91, drat:4.43, wt:2.140, qsec:16.70, vs:0, am:1, gear:5, carb:2 },
+          { mpg:30.4, cyl:4, disp: 95.1, hp:113, drat:3.77, wt:1.513, qsec:16.90, vs:1, am:1, gear:5, carb:2 },
+          { mpg:15.8, cyl:8, disp:351.0, hp:264, drat:4.22, wt:3.170, qsec:14.50, vs:0, am:1, gear:5, carb:4 },
+          { mpg:19.7, cyl:6, disp:145.0, hp:175, drat:3.62, wt:2.770, qsec:15.50, vs:0, am:1, gear:5, carb:6 },
+          { mpg:15.0, cyl:8, disp:301.0, hp:167, drat:3.54, wt:3.570, qsec:14.60, vs:0, am:1, gear:5, carb:8 },
+          { mpg:21.4, cyl:4, disp:121.0, hp:109, drat:4.11, wt:2.780, qsec:18.60, vs:1, am:1, gear:4, carb:2 },
+        ],
+      },
+
+      /* ---- 3. Longley ---------------------------------------------
+         16 rows × 7 cols. Longley (1967), via NIST StRD.
+         Condition number of X'X ≈ 5e9 — extreme multicollinearity.
+         The defining numerical-accuracy benchmark for OLS solvers.
+         Naive normal-equations solvers lose 8+ digits; QR-based
+         solvers retain ≥ 6.
+         NIST certified parameter values for
+           Empl ~ Defl + GNP + Unemp + Armed + Pop + Year (intercept):
+             intercept = -3.482258634596180e+06
+             Defl      =  1.506187227124324e+01
+             GNP       = -3.581917929268652e-02
+             Unemp     = -2.020229803816052e-02
+             Armed     = -1.033226867174603e-02
+             Pop       = -5.110410565733580e-02
+             Year      =  1.829151464741354e+03
+             RSS       =  8.367927736603610e+04
+             R²        =  9.954791657385452e-01
+         Source: https://www.itl.nist.gov/div898/strd/lls/data/Longley.shtml */
+      longley: {
+        name: "Longley (NIST)",
+        description: "U.S. macroeconomic time series 1947–1962. Notoriously ill-conditioned (cond ≈ 5×10⁹).",
+        teaches: "Numerical-accuracy stress test. The Self-tests page validates against NIST certified values.",
+        suggestedSpec: {
+          response: "Empl",
+          predictors: ["Defl", "GNP", "Unemp", "Armed", "Pop", "Year"],
+          family: "ols",
+        },
+        issues: ["Severe multicollinearity by design (NIST benchmark)."],
+        rows: [
+          { Year: 1947, Defl:  83.0, GNP: 234289, Unemp: 2356, Armed: 1590, Pop: 107608, Empl: 60323 },
+          { Year: 1948, Defl:  88.5, GNP: 259426, Unemp: 2325, Armed: 1456, Pop: 108632, Empl: 61122 },
+          { Year: 1949, Defl:  88.2, GNP: 258054, Unemp: 3682, Armed: 1616, Pop: 109773, Empl: 60171 },
+          { Year: 1950, Defl:  89.5, GNP: 284599, Unemp: 3351, Armed: 1650, Pop: 110929, Empl: 61187 },
+          { Year: 1951, Defl:  96.2, GNP: 328975, Unemp: 2099, Armed: 3099, Pop: 112075, Empl: 63221 },
+          { Year: 1952, Defl:  98.1, GNP: 346999, Unemp: 1932, Armed: 3594, Pop: 113270, Empl: 63639 },
+          { Year: 1953, Defl:  99.0, GNP: 365385, Unemp: 1870, Armed: 3547, Pop: 115094, Empl: 64989 },
+          { Year: 1954, Defl: 100.0, GNP: 363112, Unemp: 3578, Armed: 3350, Pop: 116219, Empl: 63761 },
+          { Year: 1955, Defl: 101.2, GNP: 397469, Unemp: 2904, Armed: 3048, Pop: 117388, Empl: 66019 },
+          { Year: 1956, Defl: 104.6, GNP: 419180, Unemp: 2822, Armed: 2857, Pop: 118734, Empl: 67857 },
+          { Year: 1957, Defl: 108.4, GNP: 442769, Unemp: 2936, Armed: 2798, Pop: 120445, Empl: 68169 },
+          { Year: 1958, Defl: 110.8, GNP: 444546, Unemp: 4681, Armed: 2637, Pop: 121950, Empl: 66513 },
+          { Year: 1959, Defl: 112.6, GNP: 482704, Unemp: 3813, Armed: 2552, Pop: 123366, Empl: 68655 },
+          { Year: 1960, Defl: 114.2, GNP: 502601, Unemp: 3931, Armed: 2514, Pop: 125368, Empl: 69564 },
+          { Year: 1961, Defl: 115.7, GNP: 518173, Unemp: 4806, Armed: 2572, Pop: 127852, Empl: 69331 },
+          { Year: 1962, Defl: 116.9, GNP: 554894, Unemp: 4007, Armed: 2827, Pop: 130081, Empl: 70551 },
+        ],
+      },
+
+      /* ---- 4. KingHousing ----------------------------------------
+         50 rows × 6 cols. Curated subset of 2014–2015 King County, WA
+         home sales (public-domain dataset). Replaces the classic
+         "Boston housing" dataset (which has documented sourcing/ethics
+         concerns) for teaching multiple regression with a binary
+         categorical predictor and visibly heteroscedastic residuals.
+         Variables: price ($), sqft (living), bedrooms, bathrooms,
+                    yr_built, waterfront ("yes" / "no").
+         Suggested fit: price ~ sqft + bedrooms + bathrooms + waterfront */
+      kinghousing: {
+        name: "King County housing (50)",
+        description: "Curated 50-row sample of King County, WA home sales (2014–2015).",
+        teaches: "Real-world multiple regression with a categorical predictor and heteroscedastic residuals.",
+        suggestedSpec: {
+          response: "price",
+          predictors: ["sqft", "bedrooms", "bathrooms", "waterfront"],
+          family: "ols",
+        },
+        rows: [
+          { price:  221900, sqft:1180, bedrooms:3, bathrooms:1.00, yr_built:1955, waterfront:"no"  },
+          { price:  538000, sqft:2570, bedrooms:3, bathrooms:2.25, yr_built:1951, waterfront:"no"  },
+          { price:  180000, sqft: 770, bedrooms:2, bathrooms:1.00, yr_built:1933, waterfront:"no"  },
+          { price:  604000, sqft:1960, bedrooms:4, bathrooms:3.00, yr_built:1965, waterfront:"no"  },
+          { price:  510000, sqft:1680, bedrooms:3, bathrooms:2.00, yr_built:1987, waterfront:"no"  },
+          { price: 1225000, sqft:5420, bedrooms:4, bathrooms:4.50, yr_built:2001, waterfront:"no"  },
+          { price:  257500, sqft:1715, bedrooms:3, bathrooms:2.25, yr_built:1995, waterfront:"no"  },
+          { price:  291850, sqft:1060, bedrooms:3, bathrooms:1.50, yr_built:1963, waterfront:"no"  },
+          { price:  229500, sqft:1780, bedrooms:3, bathrooms:1.00, yr_built:1960, waterfront:"no"  },
+          { price:  323000, sqft:1890, bedrooms:3, bathrooms:2.50, yr_built:2003, waterfront:"no"  },
+          { price:  662500, sqft:3560, bedrooms:3, bathrooms:2.50, yr_built:1965, waterfront:"no"  },
+          { price:  468000, sqft:1160, bedrooms:2, bathrooms:1.00, yr_built:1942, waterfront:"no"  },
+          { price:  310000, sqft:1430, bedrooms:3, bathrooms:1.75, yr_built:1927, waterfront:"no"  },
+          { price:  400000, sqft:1370, bedrooms:3, bathrooms:1.75, yr_built:1977, waterfront:"no"  },
+          { price:  530000, sqft:1810, bedrooms:5, bathrooms:1.50, yr_built:1900, waterfront:"no"  },
+          { price:  650000, sqft:2950, bedrooms:4, bathrooms:3.00, yr_built:1979, waterfront:"no"  },
+          { price:  395000, sqft:1890, bedrooms:4, bathrooms:2.00, yr_built:1994, waterfront:"no"  },
+          { price:  485000, sqft:1600, bedrooms:3, bathrooms:1.50, yr_built:1929, waterfront:"no"  },
+          { price:  189000, sqft:1200, bedrooms:4, bathrooms:1.00, yr_built:1953, waterfront:"no"  },
+          { price:  230000, sqft:1250, bedrooms:3, bathrooms:1.50, yr_built:1945, waterfront:"no"  },
+          { price:  385000, sqft:1620, bedrooms:3, bathrooms:1.00, yr_built:1952, waterfront:"no"  },
+          { price:  285000, sqft:1240, bedrooms:3, bathrooms:1.75, yr_built:1922, waterfront:"no"  },
+          { price:  252700, sqft:1060, bedrooms:2, bathrooms:1.50, yr_built:1944, waterfront:"no"  },
+          { price:  329000, sqft:2330, bedrooms:5, bathrooms:1.50, yr_built:1922, waterfront:"no"  },
+          { price:  233000, sqft:1280, bedrooms:3, bathrooms:1.00, yr_built:1985, waterfront:"no"  },
+          { price:  937000, sqft:2450, bedrooms:3, bathrooms:1.75, yr_built:1923, waterfront:"no"  },
+          { price:  667000, sqft:1400, bedrooms:3, bathrooms:1.75, yr_built:1942, waterfront:"no"  },
+          { price:  438000, sqft:1520, bedrooms:3, bathrooms:1.75, yr_built:2003, waterfront:"no"  },
+          { price:  719000, sqft:2570, bedrooms:3, bathrooms:2.25, yr_built:2001, waterfront:"no"  },
+          { price:  280000, sqft: 980, bedrooms:2, bathrooms:1.00, yr_built:1947, waterfront:"no"  },
+          { price:  687500, sqft:3450, bedrooms:4, bathrooms:3.25, yr_built:2008, waterfront:"no"  },
+          { price:  322500, sqft:1480, bedrooms:3, bathrooms:1.75, yr_built:1979, waterfront:"no"  },
+          { price:  696000, sqft:3070, bedrooms:4, bathrooms:2.50, yr_built:1999, waterfront:"no"  },
+          { price:  550000, sqft:2030, bedrooms:3, bathrooms:2.50, yr_built:2004, waterfront:"no"  },
+          { price:  640000, sqft:2410, bedrooms:4, bathrooms:2.50, yr_built:2009, waterfront:"no"  },
+          { price:  240000, sqft:1320, bedrooms:3, bathrooms:1.00, yr_built:1959, waterfront:"no"  },
+          { price:  605000, sqft:2740, bedrooms:4, bathrooms:2.50, yr_built:2007, waterfront:"no"  },
+          { price:  625000, sqft:2390, bedrooms:4, bathrooms:2.50, yr_built:1996, waterfront:"no"  },
+          { price:  775000, sqft:3120, bedrooms:4, bathrooms:2.50, yr_built:2000, waterfront:"no"  },
+          { price:  592500, sqft:1860, bedrooms:3, bathrooms:1.75, yr_built:1965, waterfront:"no"  },
+          { price:  335000, sqft:1490, bedrooms:3, bathrooms:1.75, yr_built:1988, waterfront:"no"  },
+          { price: 1350000, sqft:3640, bedrooms:4, bathrooms:3.50, yr_built:2002, waterfront:"yes" },
+          { price: 1875000, sqft:4470, bedrooms:5, bathrooms:4.00, yr_built:2005, waterfront:"yes" },
+          { price: 2150000, sqft:4150, bedrooms:4, bathrooms:3.50, yr_built:1989, waterfront:"yes" },
+          { price:  920000, sqft:2730, bedrooms:3, bathrooms:2.50, yr_built:1976, waterfront:"yes" },
+          { price:  410000, sqft:1340, bedrooms:2, bathrooms:1.75, yr_built:2007, waterfront:"no"  },
+          { price:  235000, sqft:1430, bedrooms:3, bathrooms:1.00, yr_built:1976, waterfront:"no"  },
+          { price:  370000, sqft:1840, bedrooms:4, bathrooms:1.50, yr_built:1965, waterfront:"no"  },
+          { price:  525000, sqft:2390, bedrooms:4, bathrooms:2.50, yr_built:2010, waterfront:"no"  },
+          { price:  468000, sqft:1820, bedrooms:3, bathrooms:1.75, yr_built:1979, waterfront:"no"  },
+        ],
+      },
+
+      // Step 6 adds airquality, cars_speed_dist, iris_binary, pima here.
+    };
 
     /* ===== 2-9. Namespace skeletons =====
        Each namespace exposes its public surface now so app() can dispatch
