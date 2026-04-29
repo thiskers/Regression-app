@@ -15,6 +15,9 @@
        Plotly container sizing, modal/overlay scaffolding, print CSS.
        =========================================================== */
 
+    /* Hide elements until Alpine has initialised so bindings don't flash. */
+    [x-cloak] { display: none !important; }
+
     /* ---- Theme tokens (extend Pico's variables) ---- */
     :root {
       --app-sidebar-width: 320px;
@@ -410,18 +413,306 @@
   </style>
 </head>
 <body>
-  <main class="container" x-data="app()" x-init="init()">
-    <header>
-      <hgroup>
-        <h1>Regression-app</h1>
-        <p>Statistical regression workbench — load a sample dataset or upload your own CSV. Full inference, diagnostics, and plain-English interpretation. <em>(UI scaffolding will land in subsequent steps.)</em></p>
-      </hgroup>
+  <main class="app-shell" x-data="app()" x-init="init()" x-cloak>
+
+    <!-- ============================================================
+         HEADER
+         ============================================================ -->
+    <header class="app-header">
+      <h1>Regression-app</h1>
+
+      <div class="header-controls">
+        <select x-model="ui.selectedSample"
+                @change="loadSample(ui.selectedSample)"
+                aria-label="Load sample dataset">
+          <option value="">Sample dataset…</option>
+          <template x-for="s in availableSamples" :key="s.key">
+            <option :value="s.key" x-text="s.label"></option>
+          </template>
+        </select>
+
+        <button type="button"
+                class="secondary"
+                @click="ui.uploadOpen = true"
+                title="Upload a CSV file">Upload CSV</button>
+
+        <button type="button"
+                class="secondary"
+                @click="ui.pasteOpen = true"
+                title="Paste tabular data">Paste</button>
+
+        <button type="button"
+                class="secondary"
+                @click="startTutorial()"
+                title="Run the in-app tutorial">Tutorial</button>
+
+        <button type="button"
+                class="secondary"
+                :disabled="!model"
+                @click="ui.exportOpen = !ui.exportOpen"
+                title="Export results">Export ▾</button>
+
+        <button type="button"
+                class="secondary"
+                @click="toggleTheme()"
+                :aria-label="ui.darkMode ? 'Switch to light theme' : 'Switch to dark theme'"
+                x-text="ui.darkMode ? '☀' : '☾'"></button>
+      </div>
     </header>
 
-    <article>
-      <p>Boot status: <strong x-text="bootStatus"></strong></p>
-      <p>External libraries detected: <code x-text="libsDetected"></code></p>
-    </article>
+    <!-- ============================================================
+         SIDEBAR
+         ============================================================ -->
+    <aside class="app-sidebar">
+
+      <!-- 1. Data status -->
+      <section class="sidebar-section">
+        <h3>1. Data</h3>
+        <div class="field">
+          <span x-show="dataset.source === 'none'"
+                style="color: var(--pico-muted-color); font-size: 0.85rem">
+            No data loaded. Pick a sample or upload a CSV.
+          </span>
+          <span x-show="dataset.source !== 'none'" style="font-size: 0.88rem">
+            <strong x-text="dataset.name || 'Unnamed'"></strong>
+            <small>
+              — <span x-text="dataset.rows.length"></span> rows ×
+              <span x-text="dataset.columns.length"></span> cols
+              (<span x-text="dataset.source"></span>)
+            </small>
+          </span>
+        </div>
+        <template x-for="issue in dataset.issues" :key="issue">
+          <div class="field"><span class="pill warn"><span class="dot"></span><span x-text="issue"></span></span></div>
+        </template>
+      </section>
+
+      <!-- 2. Variables -->
+      <section class="sidebar-section" x-show="dataset.columns.length > 0">
+        <h3>2. Variables</h3>
+
+        <div class="field">
+          <label for="response-pick">Response (y)</label>
+          <select id="response-pick" x-model="spec.response">
+            <option value="">— pick —</option>
+            <template x-for="c in dataset.columns" :key="c.name">
+              <option :value="c.name"
+                      :disabled="c.type === 'string' && config.family !== 'logistic'"
+                      x-text="c.name + ' (' + c.type + ')'"></option>
+            </template>
+          </select>
+        </div>
+
+        <div class="field">
+          <label>Predictors (x)</label>
+          <div class="var-list">
+            <template x-for="c in dataset.columns" :key="c.name">
+              <div class="var-row" x-show="c.name !== spec.response">
+                <input type="checkbox"
+                       :checked="spec.predictors.includes(c.name)"
+                       @change="togglePredictor(c.name)"
+                       :id="'pred-' + c.name">
+                <label :for="'pred-' + c.name" class="var-name" x-text="c.name"></label>
+                <span class="var-meta" x-text="c.type"></span>
+              </div>
+            </template>
+          </div>
+          <small style="color: var(--pico-muted-color); font-size: 0.75rem">
+            <span x-text="spec.predictors.length"></span> selected
+          </small>
+        </div>
+
+        <div class="field">
+          <label for="missing-policy">Missing-data policy</label>
+          <select id="missing-policy" x-model="spec.missingPolicy">
+            <option value="listwise">Listwise deletion</option>
+            <option value="mean">Mean impute</option>
+            <option value="median">Median impute</option>
+          </select>
+        </div>
+      </section>
+
+      <!-- 3. Model -->
+      <section class="sidebar-section" x-show="dataset.columns.length > 0">
+        <h3>3. Model</h3>
+
+        <div class="field">
+          <label for="family-pick">Family</label>
+          <select id="family-pick" x-model="config.family">
+            <option value="ols">OLS (linear)</option>
+            <option value="polynomial">Polynomial</option>
+            <option value="logistic">Logistic (binary)</option>
+          </select>
+        </div>
+
+        <div class="field" x-show="config.family === 'polynomial'">
+          <label for="poly-degree">Polynomial degree</label>
+          <input type="number" id="poly-degree" min="2" max="6"
+                 x-model.number="config.polynomialDegree">
+        </div>
+
+        <label class="inline">
+          <input type="checkbox" x-model="config.intercept">
+          Include intercept
+        </label>
+
+        <label class="inline">
+          <input type="checkbox" x-model="config.robustSE"
+                 :disabled="config.family !== 'ols'">
+          Robust (HC3) standard errors
+        </label>
+
+        <label class="inline">
+          <input type="checkbox" x-model="spec.standardize">
+          Standardise predictors
+        </label>
+
+        <button class="fit-button"
+                :class="{ dirty: ui.specDirty && model }"
+                @click="fit()"
+                :disabled="!canFit"
+                x-text="model ? (ui.specDirty ? 'Refit (spec changed)' : 'Refit') : 'Fit model'"></button>
+
+        <small x-show="!canFit && dataset.rows.length > 0"
+               style="color: var(--pico-muted-color); font-size: 0.75rem">
+          Pick a response and at least one predictor.
+        </small>
+      </section>
+
+    </aside>
+
+    <!-- ============================================================
+         MAIN CONTENT
+         ============================================================ -->
+    <section class="app-content">
+
+      <!-- Tab strip -->
+      <nav class="tab-strip" role="tablist">
+        <template x-for="t in tabs" :key="t.key">
+          <button :class="{ active: ui.activeTab === t.key }"
+                  :disabled="t.requiresModel && !model"
+                  @click="setTab(t.key)"
+                  role="tab"
+                  :aria-selected="ui.activeTab === t.key"
+                  x-text="t.label"></button>
+        </template>
+      </nav>
+
+      <!-- Tab: Summary -->
+      <div class="tab-panel" x-show="ui.activeTab === 'summary'">
+        <article class="panel">
+          <h2 class="panel-title">Summary</h2>
+          <p x-show="!model" style="color: var(--pico-muted-color)">
+            No model fit yet. Load a sample, pick a response and predictors, then click <strong>Fit</strong>.
+          </p>
+          <div x-show="model" style="font-style: italic; color: var(--pico-muted-color)">
+            (Headline numbers and one-paragraph auto-summary land in Step 8.)
+          </div>
+        </article>
+      </div>
+
+      <!-- Tab: Coefficients -->
+      <div class="tab-panel" x-show="ui.activeTab === 'coefficients'">
+        <article class="panel">
+          <h2 class="panel-title">Coefficients</h2>
+          <p style="color: var(--pico-muted-color)">Coefficient table arrives in Step 8 (estimate, SE, t/z, p, 95 % CI, standardised β, VIF).</p>
+        </article>
+      </div>
+
+      <!-- Tab: Diagnostics -->
+      <div class="tab-panel" x-show="ui.activeTab === 'diagnostics'">
+        <article class="panel">
+          <h2 class="panel-title">Diagnostics</h2>
+          <p style="color: var(--pico-muted-color)">Durbin-Watson, Breusch-Pagan, Jarque-Bera, Shapiro-Wilk, leverage, Cook's distance — Step 9.</p>
+        </article>
+      </div>
+
+      <!-- Tab: Plots -->
+      <div class="tab-panel" x-show="ui.activeTab === 'plots'">
+        <article class="panel">
+          <h2 class="panel-title">Diagnostic plots</h2>
+          <p style="color: var(--pico-muted-color)">All Plotly figures arrive in Steps 10–11.</p>
+        </article>
+      </div>
+
+      <!-- Tab: Predictions -->
+      <div class="tab-panel" x-show="ui.activeTab === 'predictions'">
+        <article class="panel">
+          <h2 class="panel-title">Predictions</h2>
+          <p style="color: var(--pico-muted-color)">Single-row predictor form + bulk CSV prediction — Step 13.</p>
+        </article>
+      </div>
+
+      <!-- Tab: Interpretation -->
+      <div class="tab-panel" x-show="ui.activeTab === 'interpretation'">
+        <article class="panel">
+          <h2 class="panel-title">Interpretation</h2>
+          <p style="color: var(--pico-muted-color)">Plain-English auto-interpretation — Step 12.</p>
+        </article>
+      </div>
+
+      <!-- Tab: About -->
+      <div class="tab-panel" x-show="ui.activeTab === 'about'">
+        <article class="panel">
+          <h2 class="panel-title">About this app</h2>
+          <p>
+            <strong>Regression-app</strong> is a single-file browser tool for statistical
+            regression analysis. Load a sample or your own CSV, fit OLS / polynomial /
+            logistic models, inspect a full diagnostic suite, and read a plain-English
+            interpretation of what the model says.
+          </p>
+          <p>
+            Numerical accuracy is validated against the
+            <a href="https://www.itl.nist.gov/div898/strd/" target="_blank" rel="noopener">NIST StRD</a>
+            reference datasets. Open <a href="#selftest" @click.prevent="ui.activeTab = 'about'">Run self-tests</a>
+            (footer) once Step 15 has landed.
+          </p>
+          <p style="font-size: 0.8rem; color: var(--pico-muted-color)">
+            Build status: <code x-text="bootStatus"></code><br>
+            Libraries: <code x-text="libsDetected"></code>
+          </p>
+        </article>
+      </div>
+
+    </section>
+
+    <!-- ============================================================
+         FOOTER
+         ============================================================ -->
+    <footer class="app-footer">
+      <span x-show="!model" x-text="bootStatus"></span>
+      <span x-show="model">
+        <strong x-text="config.family.toUpperCase()"></strong>:
+        n=<span x-text="dataset.rows.length"></span>,
+        p=<span x-text="spec.predictors.length"></span>
+      </span>
+      <span class="spacer"></span>
+      <a href="#selftest"
+         @click.prevent="ui.activeTab = 'about'"
+         title="Run NIST validation self-tests (Step 15)">Run self-tests</a>
+    </footer>
+
+    <!-- ============================================================
+         OVERLAYS (placeholders — full implementations in later steps)
+         ============================================================ -->
+    <div class="modal-backdrop" x-show="ui.uploadOpen" x-cloak @click.self="ui.uploadOpen = false">
+      <div class="modal-dialog">
+        <h3>Upload CSV</h3>
+        <p>CSV upload + Papa Parse wiring lands in Step 4.</p>
+        <button @click="ui.uploadOpen = false">Close</button>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" x-show="ui.pasteOpen" x-cloak @click.self="ui.pasteOpen = false">
+      <div class="modal-dialog">
+        <h3>Paste data</h3>
+        <p>Paste-CSV + Papa Parse wiring lands in Step 4.</p>
+        <button @click="ui.pasteOpen = false">Close</button>
+      </div>
+    </div>
+
+    <div class="tutorial-overlay" x-show="ui.tutorialActive" x-cloak></div>
+
   </main>
 
   <!--
@@ -440,19 +731,129 @@
     For Step 1 this is just a stub so Alpine has something to bind to.
   -->
   <script>
+    /* Step 3 stub. Step 4 replaces this with the canonical state shape from
+       PLAN.md plus method skeletons for every namespace (NumLib, Stats, Diag,
+       Plots, Interpret, Report, Tutorial, SelfTest). For now we provide just
+       enough state to render the body without console errors. */
     function app() {
       return {
+        // ---- Header / sample loader ----
+        availableSamples: [
+          /* Populated in Step 5/6; placeholder so the dropdown renders. */
+        ],
+
+        // ---- Tabs ----
+        tabs: [
+          { key: "summary",        label: "Summary",        requiresModel: false },
+          { key: "coefficients",   label: "Coefficients",   requiresModel: true  },
+          { key: "diagnostics",    label: "Diagnostics",    requiresModel: true  },
+          { key: "plots",          label: "Plots",          requiresModel: true  },
+          { key: "predictions",    label: "Predictions",    requiresModel: true  },
+          { key: "interpretation", label: "Interpretation", requiresModel: true  },
+          { key: "about",          label: "About",          requiresModel: false },
+        ],
+
+        // ---- Status (filled by init()) ----
         bootStatus: "initialising…",
         libsDetected: "(checked on init)",
+
+        // ---- Data layer ----
+        dataset: {
+          source: "none",   // 'none' | 'sample' | 'upload' | 'paste'
+          name: "",
+          rows: [],
+          columns: [],      // [{ name, type: 'numeric'|'string'|'binary', missing }]
+          issues: [],
+        },
+
+        // ---- Variable spec ----
+        spec: {
+          response: "",
+          predictors: [],
+          missingPolicy: "listwise",
+          standardize: false,
+          transforms: {},
+          encoding: {},
+        },
+
+        // ---- Model config ----
+        config: {
+          family: "ols",
+          intercept: true,
+          robustSE: false,
+          polynomialDegree: 2,
+          ciLevel: 0.95,
+          maxIter: 50,
+          tol: 1e-8,
+        },
+
+        // ---- Fit result ----
+        model: null,
+
+        // ---- UI state ----
+        ui: {
+          selectedSample: "",
+          activeTab: "summary",
+          uploadOpen: false,
+          pasteOpen: false,
+          exportOpen: false,
+          darkMode: false,
+          tutorialActive: false,
+          tutorialStep: 0,
+          specDirty: false,
+        },
+
+        // ---- Computed-style getters ----
+        get canFit() {
+          return !!this.spec.response &&
+                 this.spec.predictors.length > 0 &&
+                 this.dataset.rows.length > this.spec.predictors.length + 1;
+        },
+
+        // ---- Lifecycle ----
         init() {
           const have = (name, ref) => `${name}=${ref ? "ok" : "MISSING"}`;
           this.libsDetected = [
             have("ml-matrix", typeof window.mlMatrix !== "undefined" || typeof window.MLMatrix !== "undefined"),
-            have("Papa", typeof window.Papa !== "undefined"),
-            have("Plotly", typeof window.Plotly !== "undefined"),
-            have("Alpine", typeof window.Alpine !== "undefined"),
+            have("Papa",      typeof window.Papa     !== "undefined"),
+            have("Plotly",    typeof window.Plotly   !== "undefined"),
+            have("Alpine",    typeof window.Alpine   !== "undefined"),
           ].join(" ");
-          this.bootStatus = "Step 1 skeleton loaded — ready for Step 2.";
+          this.bootStatus = "Ready — load a sample dataset to begin.";
+
+          // Pico CSS responds to data-theme on <html>.
+          const saved = localStorage.getItem("regapp-theme");
+          if (saved === "dark") { this.ui.darkMode = true; document.documentElement.setAttribute("data-theme", "dark"); }
+        },
+
+        // ---- Stub methods (full implementations land in later steps) ----
+        setTab(key) { this.ui.activeTab = key; },
+
+        toggleTheme() {
+          this.ui.darkMode = !this.ui.darkMode;
+          document.documentElement.setAttribute("data-theme", this.ui.darkMode ? "dark" : "light");
+          localStorage.setItem("regapp-theme", this.ui.darkMode ? "dark" : "light");
+        },
+
+        loadSample(/* key */) {
+          // Wired in Step 5 once SAMPLES is defined.
+        },
+
+        togglePredictor(name) {
+          const i = this.spec.predictors.indexOf(name);
+          if (i === -1) this.spec.predictors.push(name);
+          else this.spec.predictors.splice(i, 1);
+          this.ui.specDirty = !!this.model;
+        },
+
+        fit() {
+          // Real fit lands in Step 8; for now we just flag state.
+          this.bootStatus = "Fit not implemented yet — arrives in Step 8.";
+        },
+
+        startTutorial() {
+          // Real tutorial lands in Step 14.
+          this.bootStatus = "Tutorial not implemented yet — arrives in Step 14.";
         },
       };
     }
