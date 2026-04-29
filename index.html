@@ -698,16 +698,30 @@
     <div class="modal-backdrop" x-show="ui.uploadOpen" x-cloak @click.self="ui.uploadOpen = false">
       <div class="modal-dialog">
         <h3>Upload CSV</h3>
-        <p>CSV upload + Papa Parse wiring lands in Step 4.</p>
-        <button @click="ui.uploadOpen = false">Close</button>
+        <p style="font-size: 0.85rem; color: var(--pico-muted-color); margin-top: 0">
+          Pick a CSV / TSV file. Headers expected on row 1; column types are auto-detected.
+        </p>
+        <input type="file" accept=".csv,.tsv,.txt"
+               @change="if ($event.target.files[0]) { onCsvUpload($event.target.files[0]); $event.target.value = ''; }">
+        <div style="display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem">
+          <button class="secondary" @click="ui.uploadOpen = false">Cancel</button>
+        </div>
       </div>
     </div>
 
     <div class="modal-backdrop" x-show="ui.pasteOpen" x-cloak @click.self="ui.pasteOpen = false">
       <div class="modal-dialog">
         <h3>Paste data</h3>
-        <p>Paste-CSV + Papa Parse wiring lands in Step 4.</p>
-        <button @click="ui.pasteOpen = false">Close</button>
+        <p style="font-size: 0.85rem; color: var(--pico-muted-color); margin-top: 0">
+          Comma / tab / semicolon separated; first row is column names.
+        </p>
+        <textarea x-model="ui.pasteText" rows="10"
+                  placeholder="x,y&#10;1,2.3&#10;2,4.1&#10;3,6.0"
+                  style="width: 100%; font-family: var(--app-mono); font-size: 0.8rem"></textarea>
+        <div style="display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.75rem">
+          <button class="secondary" @click="ui.pasteOpen = false">Cancel</button>
+          <button @click="onPaste(ui.pasteText)" :disabled="!ui.pasteText.trim()">Parse</button>
+        </div>
       </div>
     </div>
 
@@ -731,18 +745,126 @@
     For Step 1 this is just a stub so Alpine has something to bind to.
   -->
   <script>
-    /* Step 3 stub. Step 4 replaces this with the canonical state shape from
-       PLAN.md plus method skeletons for every namespace (NumLib, Stats, Diag,
-       Plots, Interpret, Report, Tutorial, SelfTest). For now we provide just
-       enough state to render the body without console errors. */
+    /* ============================================================
+       Regression-app — application code
+       --------------------------------------------------------------
+       Layout:
+         1. SAMPLES         inline reference datasets (Steps 5-6 fill)
+         2. NumLib          distributions / numerical primitives (Step 7)
+         3. Stats           buildDesign + fitOLS / fitLogistic (Steps 8, 13)
+         4. Diag            leverage / Cook's / VIF / DW / BP / JB / SW (Step 9)
+         5. Plots           Plotly figure factories (Steps 10-11)
+         6. Interpret       rules engine + 12+ rules (Step 12)
+         7. Report          JSON / Markdown / print-CSS export (Step 15)
+         8. Tutorial        spotlight overlay (Step 14)
+         9. SelfTest        NIST StRD validation (Step 15)
+        10. app()           Alpine factory — state + method dispatch
+       ============================================================ */
+
+    /* ===== 1. Sample datasets (filled by Steps 5-6) ===== */
+    const SAMPLES = {};
+
+    /* ===== 2-9. Namespace skeletons =====
+       Each namespace exposes its public surface now so app() can dispatch
+       into it from Step 4 onwards. Methods that aren't yet implemented
+       throw a friendly "not implemented yet — arrives in Step N" error
+       which fit() catches and surfaces in the errors panel. The shapes
+       below are the contracts the later steps must satisfy. */
+
+    const _NI = (name, step) => () => {
+      throw new Error(`${name} not implemented yet — arrives in Step ${step}.`);
+    };
+
+    const NumLib = (function () {
+      // Distribution functions + helpers — Step 7.
+      const ni = (n) => _NI("NumLib." + n, 7);
+      return {
+        erf: ni("erf"), erfc: ni("erfc"),
+        normCDF: ni("normCDF"), normInv: ni("normInv"),
+        gammaLn: ni("gammaLn"), betaLn: ni("betaLn"),
+        betaInc: ni("betaInc"), gammaInc: ni("gammaInc"),
+        tCDF: ni("tCDF"), fCDF: ni("fCDF"), chi2CDF: ni("chi2CDF"),
+        mean: ni("mean"), variance: ni("variance"), sd: ni("sd"),
+        quantile: ni("quantile"), pearsonR: ni("pearsonR"),
+      };
+    })();
+
+    const Stats = (function () {
+      return {
+        buildDesign: _NI("Stats.buildDesign", 8),
+        fitOLS:      _NI("Stats.fitOLS",      8),
+        fitLogistic: _NI("Stats.fitLogistic", 13),
+      };
+    })();
+
+    const Diag = (function () {
+      return {
+        compute: _NI("Diag.compute", 9),
+      };
+    })();
+
+    const Plots = (function () {
+      // _theme returns a Plotly layout fragment shared across figures.
+      // renderAll is a no-op pre-Step-10 so fit() can call it safely.
+      return {
+        _theme()                  { return {}; },
+        renderAll(/* model */)    { /* populated in Steps 10-11 */ },
+        scatterFit:    _NI("Plots.scatterFit",    10),
+        residFitted:   _NI("Plots.residFitted",   10),
+        qqNormal:      _NI("Plots.qqNormal",      10),
+        scaleLocation: _NI("Plots.scaleLocation", 10),
+        residLeverage: _NI("Plots.residLeverage",   11),
+        residHistogram:_NI("Plots.residHistogram",  11),
+        corrHeatmap:   _NI("Plots.corrHeatmap",     11),
+        partialRegression: _NI("Plots.partialRegression", 11),
+        predictedActual:   _NI("Plots.predictedActual",   11),
+        coefForest:        _NI("Plots.coefForest",        11),
+        influenceIndex:    _NI("Plots.influenceIndex",    11),
+        roc:               _NI("Plots.roc",               13),
+        calibration:       _NI("Plots.calibration",       13),
+      };
+    })();
+
+    const Interpret = (function () {
+      // run() returns an empty bundle pre-Step-12 so the Interpretation
+      // tab renders cleanly (no rules fire). The full RULES list lands then.
+      return {
+        RULES: [],
+        run(/* model */) {
+          return { headline: "", overall: [], predictors: [], assumptions: [], recommend: [] };
+        },
+      };
+    })();
+
+    const Report = (function () {
+      return {
+        json:     _NI("Report.json",     15),
+        markdown: _NI("Report.markdown", 15),
+        print:    _NI("Report.print",    15),
+      };
+    })();
+
+    const Tutorial = (function () {
+      // No-op until Step 14 so the Tutorial button doesn't throw before then.
+      return {
+        STEPS: [],
+        start() { /* Step 14 */ },
+        next()  { /* Step 14 */ },
+        prev()  { /* Step 14 */ },
+        exit()  { /* Step 14 */ },
+      };
+    })();
+
+    const SelfTest = (function () {
+      return {
+        run: _NI("SelfTest.run", 15),
+      };
+    })();
+
+    /* ===== 10. app() — Alpine factory ===== */
     function app() {
       return {
-        // ---- Header / sample loader ----
-        availableSamples: [
-          /* Populated in Step 5/6; placeholder so the dropdown renders. */
-        ],
-
-        // ---- Tabs ----
+        /* ---- Tab definitions (static) ---- */
         tabs: [
           { key: "summary",        label: "Summary",        requiresModel: false },
           { key: "coefficients",   label: "Coefficients",   requiresModel: true  },
@@ -753,44 +875,50 @@
           { key: "about",          label: "About",          requiresModel: false },
         ],
 
-        // ---- Status (filled by init()) ----
-        bootStatus: "initialising…",
-        libsDetected: "(checked on init)",
+        /* ---- Header / sample loader ---- */
+        availableSamples: [],   // populated in init() from SAMPLES
 
-        // ---- Data layer ----
+        /* ---- Status ---- */
+        bootStatus: "initialising…",
+        libsDetected: "",
+
+        /* ---- Data layer ---- */
         dataset: {
           source: "none",   // 'none' | 'sample' | 'upload' | 'paste'
           name: "",
           rows: [],
-          columns: [],      // [{ name, type: 'numeric'|'string'|'binary', missing }]
+          columns: [],      // [{ name, type, missing, unique }]
           issues: [],
+          sha256: null,     // filled for uploaded files (Step 15)
         },
 
-        // ---- Variable spec ----
+        /* ---- Variable spec ---- */
         spec: {
           response: "",
           predictors: [],
-          missingPolicy: "listwise",
+          missingPolicy: "listwise",   // 'listwise' | 'mean' | 'median'
           standardize: false,
-          transforms: {},
-          encoding: {},
+          transforms: {},              // { colName: 'none'|'log'|'sqrt'|'square'|'standardize' }
+          encoding: {},                // { colName: 'dummy'|'onehot' }
+          referenceLevels: {},         // { colName: 'firstLevelString' }
         },
 
-        // ---- Model config ----
+        /* ---- Model config ---- */
         config: {
-          family: "ols",
+          family: "ols",               // 'ols' | 'polynomial' | 'logistic'
           intercept: true,
           robustSE: false,
           polynomialDegree: 2,
           ciLevel: 0.95,
           maxIter: 50,
           tol: 1e-8,
+          logisticThreshold: 0.5,
         },
 
-        // ---- Fit result ----
+        /* ---- Fit result ---- */
         model: null,
 
-        // ---- UI state ----
+        /* ---- UI state ---- */
         ui: {
           selectedSample: "",
           activeTab: "summary",
@@ -801,59 +929,261 @@
           tutorialActive: false,
           tutorialStep: 0,
           specDirty: false,
+          busy: false,
+          pasteText: "",
+          toast: null,
         },
 
-        // ---- Computed-style getters ----
+        /* ---- Errors collected from fit / parse / validation ---- */
+        errors: [],
+
+        /* ---- Computed-style getters ---- */
         get canFit() {
-          return !!this.spec.response &&
-                 this.spec.predictors.length > 0 &&
-                 this.dataset.rows.length > this.spec.predictors.length + 1;
+          return !!this.spec.response
+              && this.spec.predictors.length > 0
+              && this.dataset.rows.length > this.spec.predictors.length + 1
+              && !this.ui.busy;
         },
+        get nObs()  { return this.dataset.rows.length; },
+        get nPred() { return this.spec.predictors.length; },
 
-        // ---- Lifecycle ----
+        /* =========================================================
+           Lifecycle
+           ========================================================= */
         init() {
-          const have = (name, ref) => `${name}=${ref ? "ok" : "MISSING"}`;
+          // Library detection — useful in About tab while developing.
+          const have = (n, ok) => `${n}=${ok ? "ok" : "MISSING"}`;
           this.libsDetected = [
             have("ml-matrix", typeof window.mlMatrix !== "undefined" || typeof window.MLMatrix !== "undefined"),
             have("Papa",      typeof window.Papa     !== "undefined"),
             have("Plotly",    typeof window.Plotly   !== "undefined"),
             have("Alpine",    typeof window.Alpine   !== "undefined"),
           ].join(" ");
-          this.bootStatus = "Ready — load a sample dataset to begin.";
 
-          // Pico CSS responds to data-theme on <html>.
+          // Populate sample dropdown from SAMPLES (filled in Step 5/6).
+          this.availableSamples = Object.entries(SAMPLES).map(([key, s]) => ({
+            key, label: s.name || key,
+          }));
+
+          // Theme: respect saved preference.
           const saved = localStorage.getItem("regapp-theme");
-          if (saved === "dark") { this.ui.darkMode = true; document.documentElement.setAttribute("data-theme", "dark"); }
+          if (saved === "dark") {
+            this.ui.darkMode = true;
+            document.documentElement.setAttribute("data-theme", "dark");
+          }
+
+          // Self-test deep link: index.html#selftest jumps straight there once Step 15 ships.
+          if (window.location.hash === "#selftest") {
+            this.ui.activeTab = "about";
+          }
+
+          this.bootStatus = this.availableSamples.length > 0
+            ? "Ready — pick a sample dataset, upload a CSV, or paste data."
+            : "Ready — upload a CSV or paste data (sample datasets bundle in Steps 5-6).";
+
+          // Watch spec/config for changes after a fit so the Refit button lights up.
+          this.$watch("spec",   () => { if (this.model) this.ui.specDirty = true; }, { deep: true });
+          this.$watch("config", () => { if (this.model) this.ui.specDirty = true; }, { deep: true });
         },
 
-        // ---- Stub methods (full implementations land in later steps) ----
+        /* =========================================================
+           Tabs / theme
+           ========================================================= */
         setTab(key) { this.ui.activeTab = key; },
 
         toggleTheme() {
           this.ui.darkMode = !this.ui.darkMode;
-          document.documentElement.setAttribute("data-theme", this.ui.darkMode ? "dark" : "light");
-          localStorage.setItem("regapp-theme", this.ui.darkMode ? "dark" : "light");
+          const t = this.ui.darkMode ? "dark" : "light";
+          document.documentElement.setAttribute("data-theme", t);
+          localStorage.setItem("regapp-theme", t);
         },
 
-        loadSample(/* key */) {
-          // Wired in Step 5 once SAMPLES is defined.
+        /* =========================================================
+           Data ingestion
+           ========================================================= */
+        loadSample(key) {
+          if (!key) return;
+          const s = SAMPLES[key];
+          if (!s) {
+            this._reportError(`Sample "${key}" is not yet bundled (arrives in Steps 5-6).`, "loadSample");
+            return;
+          }
+          const columns = Object.keys(s.rows[0] || {}).map((n) => this._inferColumn(s.rows, n));
+          this.dataset = {
+            source: "sample",
+            name:   s.name || key,
+            rows:   s.rows.slice(),
+            columns,
+            issues: (s.issues || []).slice(),
+            sha256: null,
+          };
+          this._resetSpec();
+          if (s.suggestedSpec) {
+            this.spec.response   = s.suggestedSpec.response   || "";
+            this.spec.predictors = (s.suggestedSpec.predictors || []).slice();
+            if (s.suggestedSpec.family) this.config.family = s.suggestedSpec.family;
+          }
+          this.bootStatus = `Loaded sample "${this.dataset.name}" (${this.nObs} × ${columns.length}).`;
+          this.ui.activeTab = "summary";
         },
 
+        onCsvUpload(file) {
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onerror = () => this._reportError("Could not read file: " + reader.error, "onCsvUpload");
+          reader.onload  = (e) => this._parseTabular(e.target.result, file.name, "upload");
+          reader.readAsText(file);
+        },
+
+        onPaste(text) {
+          if (!text || !text.trim()) return;
+          this._parseTabular(text, "(pasted data)", "paste");
+        },
+
+        _parseTabular(text, name, source) {
+          if (typeof window.Papa === "undefined") {
+            this._reportError("Papa Parse failed to load (CDN issue).", "_parseTabular");
+            return;
+          }
+          const result = window.Papa.parse(text, {
+            header: true,
+            dynamicTyping: true,
+            skipEmptyLines: "greedy",
+            transformHeader: (h) => h.trim(),
+          });
+          if (!result.data || result.data.length === 0) {
+            this._reportError("No rows parsed.", "_parseTabular");
+            return;
+          }
+          // Surface parse errors but don't refuse the data; users can inspect issues.
+          const issues = (result.errors || []).slice(0, 5).map(
+            (e) => `Parse warning row ${e.row + 1}: ${e.message}`
+          );
+          const rows = result.data;
+          const columns = Object.keys(rows[0]).map((n) => this._inferColumn(rows, n));
+          this.dataset = { source, name, rows, columns, issues, sha256: null };
+          this._resetSpec();
+          this.ui.uploadOpen = false;
+          this.ui.pasteOpen  = false;
+          this.ui.pasteText  = "";
+          this.bootStatus = `Loaded "${name}" (${rows.length} × ${columns.length}).`;
+          this.ui.activeTab = "summary";
+        },
+
+        _inferColumn(rows, name) {
+          let numeric = 0, missing = 0, total = 0;
+          const unique = new Set();
+          for (const r of rows) {
+            total++;
+            const v = r[name];
+            if (v === null || v === undefined || v === "" || (typeof v === "number" && Number.isNaN(v))) {
+              missing++; continue;
+            }
+            if (typeof v === "number" && Number.isFinite(v)) numeric++;
+            if (unique.size < 32) unique.add(v);
+          }
+          const valid = total - missing;
+          const numericFrac = valid > 0 ? numeric / valid : 0;
+          let type;
+          if (numericFrac >= 0.9) {
+            type = unique.size <= 2 ? "binary" : "numeric";
+          } else if (unique.size <= 2) {
+            type = "binary";
+          } else {
+            type = "string";
+          }
+          return { name, type, missing, unique: unique.size };
+        },
+
+        _resetSpec() {
+          this.spec.response = "";
+          this.spec.predictors = [];
+          this.spec.transforms = {};
+          this.spec.encoding = {};
+          this.spec.referenceLevels = {};
+          this.model = null;
+          this.errors = [];
+          this.ui.specDirty = false;
+        },
+
+        /* =========================================================
+           Variable selection
+           ========================================================= */
         togglePredictor(name) {
           const i = this.spec.predictors.indexOf(name);
           if (i === -1) this.spec.predictors.push(name);
-          else this.spec.predictors.splice(i, 1);
-          this.ui.specDirty = !!this.model;
+          else          this.spec.predictors.splice(i, 1);
         },
 
+        /* =========================================================
+           Fit dispatcher (real math lands in Steps 8 / 13)
+           ========================================================= */
         fit() {
-          // Real fit lands in Step 8; for now we just flag state.
-          this.bootStatus = "Fit not implemented yet — arrives in Step 8.";
+          if (!this.canFit) return;
+          this.errors = [];
+          this.ui.busy = true;
+          try {
+            const design = Stats.buildDesign(this.dataset.rows, {
+              ...this.spec,
+              intercept:        this.config.intercept,
+              family:           this.config.family,
+              polynomialDegree: this.config.polynomialDegree,
+            });
+            const fitter = this.config.family === "logistic" ? Stats.fitLogistic : Stats.fitOLS;
+            const model = fitter(design.X, design.y, {
+              family:    this.config.family,
+              intercept: this.config.intercept,
+              ciLevel:   this.config.ciLevel,
+              robustSE:  this.config.robustSE,
+              maxIter:   this.config.maxIter,
+              tol:       this.config.tol,
+              names:     design.names,
+              response:  this.spec.response,
+            });
+            Diag.compute(model);
+            model.interp = Interpret.run(model);
+            this.model = model;
+            this.ui.specDirty = false;
+            this.ui.activeTab = "summary";
+            // Plotly renders deferred to next tick so the panels are visible.
+            this.$nextTick(() => Plots.renderAll(model));
+            this.bootStatus = `Fit complete — ${this.config.family.toUpperCase()}, n=${this.nObs}, p=${this.nPred}.`;
+          } catch (e) {
+            this._reportError(e.message || String(e), "fit");
+          } finally {
+            this.ui.busy = false;
+          }
         },
 
+        runInterpretation() {
+          if (!this.model) return;
+          this.model.interp = Interpret.run(this.model);
+        },
+
+        /* =========================================================
+           Export — wired to Report namespace (Step 15)
+           ========================================================= */
+        exportJSON()     { try { Report.json(this.model); }     catch (e) { this._reportError(e.message, "exportJSON"); } },
+        exportMarkdown() { try { Report.markdown(this.model); } catch (e) { this._reportError(e.message, "exportMarkdown"); } },
+        print()          { try { Report.print(this.model); }    catch (e) { this._reportError(e.message, "print"); } },
+
+        /* =========================================================
+           Tutorial — wired to Tutorial namespace (Step 14)
+           ========================================================= */
         startTutorial() {
-          // Real tutorial lands in Step 14.
-          this.bootStatus = "Tutorial not implemented yet — arrives in Step 14.";
+          this.ui.tutorialActive = true;
+          this.ui.tutorialStep = 0;
+          Tutorial.start(this);
+        },
+
+        /* =========================================================
+           Internal helpers
+           ========================================================= */
+        _reportError(msg, where) {
+          this.errors.push({ level: "error", code: where || "app", msg, where });
+          this.bootStatus = `Error: ${msg}`;
+          // Console echo so power users can debug.
+          console.error("[regapp]", where, msg);
         },
       };
     }
