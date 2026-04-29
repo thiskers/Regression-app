@@ -2507,6 +2507,189 @@
         window.Plotly.newPlot(el, traces, layout, _config);
       }
 
+      /* ---- Figure 5: residuals vs leverage with Cook's contours.
+             X = h_ii, Y = studentized residual.  Dashed contours show
+             where Cook's D = 0.5 and 1.0 (rule-of-thumb thresholds).
+             Influential rows (Cook's > 4/n) are labelled with row id. */
+      function residLeverage(model, el) {
+        const dx = model.diagnostics;
+        if (!dx || !dx.leverage) { _placeholder(el, "Diagnostics not yet computed."); return; }
+        const lev  = dx.leverage;
+        const stud = dx.studResid;
+        const cooks = dx.cooks;
+        const cookT = dx.cookThreshold;
+        const p = model.spec.p;
+
+        // Cook's contour curves: r = ±√(D · p · (1 - h) / h).
+        let hMin = Math.min(...lev), hMax = Math.max(...lev);
+        if (hMin <= 0) hMin = 1e-3;
+        const grid = [];
+        for (let i = 0; i <= 80; i++) grid.push(hMin + (hMax - hMin) * i / 80);
+        const contour = (D) => grid.map((h) => h > 0 && h < 1 ? Math.sqrt(D * p * (1 - h) / h) : NaN);
+        const c05 = contour(0.5);
+        const c10 = contour(1.0);
+
+        const labels = stud.map((_, i) => cooks[i] > cookT ? `${i + 1}` : "");
+
+        const traces = [
+          { x: grid, y: c05,                 mode: "lines", name: "Cook's = 0.5", line: { color: C.warn, dash: "dash", width: 1 }, hoverinfo: "skip", legendgroup: "c05" },
+          { x: grid, y: c05.map((v) => -v),  mode: "lines",                       line: { color: C.warn, dash: "dash", width: 1 }, hoverinfo: "skip", legendgroup: "c05", showlegend: false },
+          { x: grid, y: c10,                 mode: "lines", name: "Cook's = 1.0", line: { color: "#dc2626", dash: "dash", width: 1 }, hoverinfo: "skip", legendgroup: "c10" },
+          { x: grid, y: c10.map((v) => -v),  mode: "lines",                       line: { color: "#dc2626", dash: "dash", width: 1 }, hoverinfo: "skip", legendgroup: "c10", showlegend: false },
+          { x: lev, y: stud,
+            mode: "markers+text", name: "obs",
+            marker: { size: 6, color: C.point, opacity: 0.85 },
+            text: labels, textposition: "top center",
+            textfont: { size: 9, color: C.warn },
+            customdata: cooks.map((c, i) => [i + 1, c]),
+            hovertemplate: "row %{customdata[0]}<br>leverage=%{x:.3f}<br>stud=%{y:.3f}<br>Cook's=%{customdata[1]:.4f}<extra></extra>" },
+        ];
+        const layout = Object.assign(_theme(), {
+          title: { text: "Residuals vs Leverage", font: { size: 14 } },
+          xaxis: Object.assign({}, _theme().xaxis, { title: { text: "Leverage (h_ii)" } }),
+          yaxis: Object.assign({}, _theme().yaxis, { title: { text: "Studentised residual" } }),
+        });
+        window.Plotly.newPlot(el, traces, layout, _config);
+      }
+
+      /* ---- Figure 6: histogram of residuals with N(0, σ̂) overlay.
+             Bins via Freedman-Diaconis (2 IQR / n^(1/3)).               */
+      function residHistogram(model, el) {
+        const r = model.residuals;
+        const n = r.length;
+        const sigma = model.rmse;
+        if (!(sigma > 0)) { _placeholder(el, "Residuals are constant."); return; }
+        const q25 = NumLib.quantile(r, 0.25);
+        const q75 = NumLib.quantile(r, 0.75);
+        const iqr = q75 - q25;
+        const rMin = Math.min(...r), rMax = Math.max(...r);
+        const range = rMax - rMin || 1;
+        let binWidth = (iqr > 0) ? 2 * iqr / Math.cbrt(n) : range / 15;
+        if (!(binWidth > 0) || !Number.isFinite(binWidth)) binWidth = range / 15;
+
+        // Normal overlay grid spans ±10% beyond the data.
+        const xMin = rMin - 0.1 * range, xMax = rMax + 0.1 * range;
+        const grid = [];
+        for (let i = 0; i <= 200; i++) grid.push(xMin + (xMax - xMin) * i / 200);
+        const pdf = grid.map((x) => Math.exp(-0.5 * (x / sigma) ** 2) / (sigma * Math.sqrt(2 * Math.PI)));
+
+        const traces = [
+          { x: r, type: "histogram", name: "residuals",
+            histnorm: "probability density",
+            autobinx: false,
+            xbins: { start: rMin - binWidth / 2, end: rMax + binWidth, size: binWidth },
+            marker: { color: C.point, line: { color: "white", width: 0.5 } },
+            opacity: 0.85 },
+          { x: grid, y: pdf, mode: "lines", name: `N(0, σ̂=${sigma.toFixed(3)})`, line: { color: C.line, width: 2 } },
+        ];
+        const layout = Object.assign(_theme(), {
+          title: { text: "Residual distribution", font: { size: 14 } },
+          xaxis: Object.assign({}, _theme().xaxis, { title: { text: "Residual" } }),
+          yaxis: Object.assign({}, _theme().yaxis, { title: { text: "Density" } }),
+          bargap: 0.02,
+        });
+        window.Plotly.newPlot(el, traces, layout, _config);
+      }
+
+      /* ---- Figure 7: predictor correlation heatmap.
+             Diverging palette, value annotated in each cell.             */
+      function corrHeatmap(model, el) {
+        const startCol = model.spec.hasIntercept ? 1 : 0;
+        const k = model.spec.predictorNames.length - startCol;
+        if (k < 2) { _placeholder(el, "Correlation heatmap is shown when there are ≥ 2 predictors."); return; }
+        const names = model.spec.predictorNames.slice(startCol);
+        const cols  = [];
+        for (let j = startCol; j < model.spec.predictorNames.length; j++) {
+          cols.push(model.X.map((row) => row[j]));
+        }
+        const z = [];
+        for (let i = 0; i < k; i++) {
+          const row = [];
+          for (let j = 0; j < k; j++) row.push(i === j ? 1 : NumLib.pearsonR(cols[i], cols[j]));
+          z.push(row);
+        }
+        const text = z.map((row) => row.map((v) => v.toFixed(2)));
+        const traces = [{
+          z, x: names, y: names, type: "heatmap",
+          colorscale: [[0, "#dc2626"], [0.5, "#f8fafc"], [1, "#2563eb"]],
+          zmin: -1, zmax: 1,
+          text, texttemplate: "%{text}", textfont: { size: 11 },
+          hovertemplate: "%{y} & %{x}<br>r = %{z:.3f}<extra></extra>",
+          colorbar: { thickness: 14, len: 0.7 },
+        }];
+        const layout = Object.assign(_theme(), {
+          title: { text: "Predictor correlation matrix", font: { size: 14 } },
+          xaxis: Object.assign({}, _theme().xaxis, { side: "bottom" }),
+          yaxis: Object.assign({}, _theme().yaxis, { autorange: "reversed" }),
+        });
+        window.Plotly.newPlot(el, traces, layout, _config);
+      }
+
+      /* ---- Figure 8: partial regression ("added variable") plots.
+             For each predictor j: e(y | others) vs e(x_j | others).
+             Slope of the panel == β_j of the full model.  Renders one
+             mini-plot per slope predictor inside the supplied div. */
+      function partialRegression(model, el) {
+        const startCol = model.spec.hasIntercept ? 1 : 0;
+        const slopeCols = [];
+        for (let j = startCol; j < model.spec.predictorNames.length; j++) slopeCols.push(j);
+        if (slopeCols.length < 2) { _placeholder(el, "Partial-regression plots are shown when there are ≥ 2 predictors."); return; }
+
+        const M  = window.mlMatrix.Matrix;
+        const QR = window.mlMatrix.QrDecomposition;
+        const X  = model.X, y = model.y;
+
+        // Lay out as a CSS grid of mini-plots.
+        const cols = Math.min(3, slopeCols.length);
+        el.innerHTML = "";
+        el.style.display = "grid";
+        el.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+        el.style.gap = "0.5rem";
+
+        for (const j of slopeCols) {
+          const Xother = X.map((row) => row.filter((_, i) => i !== j));
+          const xj     = X.map((row) => row[j]);
+          const Xom = new M(Xother);
+          // Residuals of y regressed on others
+          const beta_y = new QR(Xom).solve(M.columnVector(y));
+          const fit_y  = Xom.mmul(beta_y).to1DArray();
+          const e_y    = y.map((v, i) => v - fit_y[i]);
+          // Residuals of x_j regressed on others
+          const beta_x = new QR(Xom).solve(M.columnVector(xj));
+          const fit_x  = Xom.mmul(beta_x).to1DArray();
+          const e_x    = xj.map((v, i) => v - fit_x[i]);
+
+          // The slope of e_y on e_x equals β_j of the full model — draw it.
+          const eMinX = Math.min(...e_x), eMaxX = Math.max(...e_x);
+          const beta_j = model.beta[j];
+          const lineX = [eMinX, eMaxX], lineY = lineX.map((x) => beta_j * x);
+
+          const sub = document.createElement("div");
+          sub.style.minHeight = "230px";
+          el.appendChild(sub);
+
+          const traces = [
+            { x: e_x, y: e_y, mode: "markers", name: "obs",
+              marker: { size: 5, color: C.point, opacity: 0.8 },
+              showlegend: false,
+              text: e_x.map((_, i) => `row ${i + 1}`),
+              hovertemplate: "%{text}<br>e(x)=%{x:.3f}<br>e(y)=%{y:.3f}<extra></extra>" },
+            { x: lineX, y: lineY, mode: "lines",
+              line: { color: C.line, width: 2 }, showlegend: false, hoverinfo: "skip" },
+          ];
+          const layout = Object.assign(_theme(), {
+            title: { text: model.spec.predictorNames[j], font: { size: 12 } },
+            margin: { l: 44, r: 12, t: 28, b: 36 },
+            xaxis: Object.assign({}, _theme().xaxis, {
+              title: { text: `e(${model.spec.predictorNames[j]} | others)`, font: { size: 9 } } }),
+            yaxis: Object.assign({}, _theme().yaxis, {
+              title: { text: `e(${model.spec.response} | others)`, font: { size: 9 } } }),
+            showlegend: false,
+          });
+          window.Plotly.newPlot(sub, traces, layout, Object.assign({}, _config, { displayModeBar: false }));
+        }
+      }
+
       /* ---- renderAll(model) — orchestrator.
              Walks the known plot div ids and dispatches. Plots whose
              div doesn't exist (yet — e.g. Step 11 plots) are skipped.
@@ -2516,10 +2699,14 @@
         if (!model || !window.Plotly) return;
         const get = (id) => document.getElementById(id);
         const dispatch = [
-          ["plot-scatterFit",    scatterFit],
-          ["plot-residFitted",   residFitted],
-          ["plot-qqNormal",      qqNormal],
-          ["plot-scaleLocation", scaleLocation],
+          ["plot-scatterFit",        scatterFit],
+          ["plot-residFitted",       residFitted],
+          ["plot-qqNormal",          qqNormal],
+          ["plot-scaleLocation",     scaleLocation],
+          ["plot-residLeverage",     residLeverage],
+          ["plot-residHistogram",    residHistogram],
+          ["plot-corrHeatmap",       corrHeatmap],
+          ["plot-partialRegression", partialRegression],
         ];
         for (const [id, fn] of dispatch) {
           const el = get(id);
@@ -2531,11 +2718,8 @@
         _theme, _config, _lowess,
         renderAll,
         scatterFit, residFitted, qqNormal, scaleLocation,
-        // Step 11 placeholders so the namespace shape stays stable.
-        residLeverage:     _NI("Plots.residLeverage",     11),
-        residHistogram:    _NI("Plots.residHistogram",    11),
-        corrHeatmap:       _NI("Plots.corrHeatmap",       11),
-        partialRegression: _NI("Plots.partialRegression", 11),
+        residLeverage, residHistogram, corrHeatmap, partialRegression,
+        // Step 11b ships the remaining three; Step 13 ships ROC + calibration.
         predictedActual:   _NI("Plots.predictedActual",   11),
         coefForest:        _NI("Plots.coefForest",        11),
         influenceIndex:    _NI("Plots.influenceIndex",    11),
