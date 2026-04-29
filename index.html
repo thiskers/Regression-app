@@ -1799,6 +1799,10 @@
           warnings: (opts.warnings || []).slice(),
           diagnostics: {},   // filled by Diag.compute (Step 9)
           interp: null,      // filled by Interpret.run (Step 12)
+          // Design matrix + response retained for Diag (leverage / VIF /
+          // BP / influence) and Plots (partial regression). Stored as the
+          // raw 2D arrays passed in — cheap, and Diag/Plots want arrays.
+          X, y,
         };
       }
 
@@ -1810,10 +1814,294 @@
       };
     })();
 
+    /* ===== 4. Diag =====
+       Post-fit diagnostics. Mutates model.diagnostics with:
+         leverage[]            hat-matrix diagonal h_ii
+         studResid[]           internally studentized residuals
+         cooks[]               Cook's distance per observation
+         influentialIdx[]      indices where Cook's > 4/n
+         leverageThreshold     2 p / n cut-off (rule of thumb)
+         cookThreshold         4 / n
+         vif[]                 per-predictor variance inflation factor
+                               (null on the intercept column)
+         durbinWatson          autocorrelation statistic ∈ [0, 4]
+         bp { stat, p, df }    Breusch-Pagan (Koenker variant)
+         jb { stat, p, skewness, kurtosis }   Jarque-Bera normality
+         sw { stat, p }        Shapiro-Wilk (Royston 1992)
+         hc3 { se[], t[], p[], ci[][] }   if model.config.robustSE
+                               the heteroscedasticity-robust SE bundle */
     const Diag = (function () {
-      return {
-        compute: _NI("Diag.compute", 9),
-      };
+
+      function mlMat() { return window.mlMatrix; }
+
+      /* ---- Leverage h_ii via H = X(X'X)⁻¹X' diagonal.
+             For each row x_i: h_ii = x_i ⋅ (X'X)⁻¹ ⋅ x_i ----------- */
+      function leverages(X) {
+        const M = mlMat().Matrix, inv = mlMat().inverse;
+        const Xm = new M(X);
+        const XtXinv = inv(Xm.transpose().mmul(Xm));
+        const n = X.length, p = X[0].length;
+        const lev = new Array(n);
+        for (let i = 0; i < n; i++) {
+          const xi = X[i];
+          let s = 0;
+          for (let j = 0; j < p; j++) {
+            let row = 0;
+            for (let k = 0; k < p; k++) row += XtXinv.get(j, k) * xi[k];
+            s += xi[j] * row;
+          }
+          lev[i] = s;
+        }
+        return { lev, XtXinv };
+      }
+
+      function studentized(residuals, sigma, lev) {
+        return residuals.map((e, i) => {
+          const denom = sigma * Math.sqrt(Math.max(0, 1 - lev[i]));
+          return denom > 0 ? e / denom : NaN;
+        });
+      }
+
+      function cooksDistance(stud, lev, p) {
+        return stud.map((r, i) => {
+          const d = 1 - lev[i];
+          return d > 0 ? (r * r / p) * (lev[i] / d) : NaN;
+        });
+      }
+
+      /* ---- VIF: regress each predictor on the others (with intercept) and
+             compute 1 / (1 - R²_aux). Skipped for the intercept column. ---- */
+      function vifs(X, names, hasIntercept) {
+        const M = mlMat().Matrix, QR = mlMat().QrDecomposition;
+        const out = new Array(names.length).fill(null);
+        const startCol = hasIntercept ? 1 : 0;
+        for (let j = startCol; j < names.length; j++) {
+          const Xother = X.map((row) => row.filter((_, i) => i !== j));
+          const yj     = X.map((row) => row[j]);
+          if (Xother[0].length === 0) { out[j] = NaN; continue; }
+          try {
+            const Xm = new M(Xother), ym = M.columnVector(yj);
+            const beta = new QR(Xm).solve(ym);
+            const fit  = Xm.mmul(beta).to1DArray();
+            const ymean = NumLib.mean(yj);
+            let rss = 0, tss = 0;
+            for (let i = 0; i < yj.length; i++) {
+              rss += (yj[i] - fit[i]) ** 2;
+              tss += (yj[i] - ymean) ** 2;
+            }
+            const r2 = tss > 0 ? 1 - rss / tss : 0;
+            out[j] = r2 < 1 ? 1 / (1 - r2) : Infinity;
+          } catch (e) { out[j] = NaN; }
+        }
+        return out;
+      }
+
+      /* ---- Durbin-Watson:  Σ(eᵢ − eᵢ₋₁)² / Σeᵢ²   ∈ [0, 4]
+             ≈ 2 indicates no autocorrelation. We don't compute an exact
+             p-value (depends on X) — the Diagnostics tab and Step 12
+             rules use the standard < 1.5 / > 2.5 thresholds.            */
+      function durbinWatson(residuals) {
+        let num = 0, den = 0;
+        for (let i = 1; i < residuals.length; i++) {
+          const d = residuals[i] - residuals[i - 1];
+          num += d * d;
+        }
+        for (const e of residuals) den += e * e;
+        return den > 0 ? num / den : NaN;
+      }
+
+      /* ---- Breusch-Pagan (Koenker studentized variant).
+             Auxiliary regression of  e²ᵢ / mean(e²)  on the design X.
+             Statistic = n × R²_aux  ~  χ²(p − 1) under H₀.            */
+      function breuschPagan(model) {
+        const M = mlMat().Matrix, QR = mlMat().QrDecomposition;
+        const e = model.residuals;
+        const e2 = e.map((v) => v * v);
+        const mE2 = NumLib.mean(e2);
+        if (!(mE2 > 0)) return { stat: NaN, p: NaN, df: 0 };
+        const u = e2.map((v) => v / mE2);
+        try {
+          const Xm = new M(model.X);
+          const um = M.columnVector(u);
+          const beta = new QR(Xm).solve(um);
+          const fit  = Xm.mmul(beta).to1DArray();
+          const umean = NumLib.mean(u);
+          let rss = 0, tss = 0;
+          for (let i = 0; i < u.length; i++) {
+            rss += (u[i] - fit[i]) ** 2;
+            tss += (u[i] - umean) ** 2;
+          }
+          const r2_aux = tss > 0 ? 1 - rss / tss : 0;
+          const n = u.length;
+          // df = number of regressors excluding intercept.
+          const df = (model.spec.hasIntercept ? model.spec.p - 1 : model.spec.p);
+          const stat = n * r2_aux;
+          const p = df > 0 ? 1 - NumLib.chi2CDF(stat, df) : NaN;
+          return { stat, p, df };
+        } catch { return { stat: NaN, p: NaN, df: 0 }; }
+      }
+
+      /* ---- Jarque-Bera:  (n / 6) (skew² + (kurt − 3)² / 4)
+             ~ χ²(2) under H₀ of normality.                              */
+      function jarqueBera(residuals) {
+        const n = residuals.length;
+        const m = NumLib.mean(residuals);
+        let m2 = 0, m3 = 0, m4 = 0;
+        for (const e of residuals) {
+          const d = e - m;
+          const d2 = d * d;
+          m2 += d2; m3 += d2 * d; m4 += d2 * d2;
+        }
+        m2 /= n; m3 /= n; m4 /= n;
+        if (!(m2 > 0)) return { stat: NaN, p: NaN, skewness: NaN, kurtosis: NaN };
+        const skew = m3 / Math.pow(m2, 1.5);
+        const kurt = m4 / (m2 * m2);          // raw (Pearson) kurtosis: 3 = normal
+        const stat = n / 6 * (skew * skew + (kurt - 3) ** 2 / 4);
+        const p = 1 - NumLib.chi2CDF(stat, 2);
+        return { stat, p, skewness: skew, kurtosis: kurt };
+      }
+
+      /* ---- Shapiro-Wilk (Royston 1992 approximation, n in [3, 5000]).
+             Coefficients aᵢ derived from the normal scores; W is the
+             squared correlation between sample order statistics and
+             those scores. p-value is via Royston's polynomial transform. */
+      function shapiroWilk(x) {
+        const n = x.length;
+        if (n < 3)    return { stat: NaN, p: NaN, n, error: "n < 3" };
+        if (n > 5000) return { stat: NaN, p: NaN, n, error: "n > 5000" };
+
+        const sorted = x.slice().sort((u, v) => u - v);
+        const xbar   = NumLib.mean(sorted);
+
+        // Normal scores m_i = Φ⁻¹((i − 3/8) / (n + 1/4))
+        const m = new Array(n);
+        for (let i = 0; i < n; i++) m[i] = NumLib.normInv((i + 1 - 0.375) / (n + 0.25));
+        const m2norm = Math.sqrt(m.reduce((s, v) => s + v * v, 0));
+
+        // Royston coefficients a_i
+        const a = new Array(n);
+        const u  = 1 / Math.sqrt(n);
+        const u2 = u * u, u3 = u2 * u, u4 = u3 * u, u5 = u4 * u;
+        if (n === 3) {
+          a[0] = -Math.SQRT1_2; a[1] = 0; a[2] = Math.SQRT1_2;
+        } else {
+          const c = m.map((mi) => mi / m2norm);
+          a[n - 1] = -2.706056 * u5 + 4.434685 * u4 - 2.071190 * u3 - 0.147981 * u2 + 0.221157 * u + c[n - 1];
+          a[0]     = -a[n - 1];
+          if (n > 5) {
+            a[n - 2] = -3.582633 * u5 + 5.682633 * u4 - 1.752460 * u3 - 0.293762 * u2 + 0.042981 * u + c[n - 2];
+            a[1]     = -a[n - 2];
+            const sumA2 = 2 * (a[n - 1] * a[n - 1] + a[n - 2] * a[n - 2]);
+            let sumC2  = 0;
+            for (let i = 2; i < n - 2; i++) sumC2 += c[i] * c[i];
+            const factor = sumC2 > 0 ? Math.sqrt((1 - sumA2) / sumC2) : 1;
+            for (let i = 2; i < n - 2; i++) a[i] = c[i] * factor;
+          } else {
+            const sumA2 = 2 * (a[n - 1] * a[n - 1]);
+            let sumC2 = 0;
+            for (let i = 1; i < n - 1; i++) sumC2 += c[i] * c[i];
+            const factor = sumC2 > 0 ? Math.sqrt((1 - sumA2) / sumC2) : 1;
+            for (let i = 1; i < n - 1; i++) a[i] = c[i] * factor;
+          }
+        }
+
+        // W = (Σ aᵢ x₍ᵢ₎)² / Σ (xᵢ − x̄)²
+        let num = 0, den = 0;
+        for (let i = 0; i < n; i++) {
+          num += a[i] * sorted[i];
+          den += (sorted[i] - xbar) ** 2;
+        }
+        if (!(den > 0)) return { stat: 1, p: 1, n };          // constant series
+        const W = (num * num) / den;
+
+        // Royston z-transform → p-value
+        let z, mu, sigma;
+        if (n <= 11) {
+          const gamma = -2.273 + 0.459 * n;
+          mu    =  0.5440  - 0.39978  * n + 0.025054  * n * n - 0.0006714 * n * n * n;
+          sigma = Math.exp(1.3822 - 0.77857 * n + 0.062767 * n * n - 0.0020322 * n * n * n);
+          z = (Math.log(gamma - Math.log(1 - W)) - mu) / sigma;
+        } else {
+          const ln_n = Math.log(n);
+          mu    = 0.0038915 * ln_n ** 3 - 0.083751 * ln_n ** 2 - 0.31082 * ln_n - 1.5861;
+          sigma = Math.exp(0.0030302 * ln_n ** 2 - 0.082676 * ln_n - 0.4803);
+          z = (Math.log(1 - W) - mu) / sigma;
+        }
+        const p = Math.max(0, Math.min(1, 1 - NumLib.normCDF(z)));
+        return { stat: W, p, n };
+      }
+
+      /* ---- HC3 heteroscedasticity-consistent SE  (MacKinnon-White 1985):
+             V_HC3 = (X'X)⁻¹  X' diag(eᵢ² / (1 − hᵢᵢ)²) X  (X'X)⁻¹      */
+      function hc3SE(model, lev, XtXinv) {
+        const M = mlMat().Matrix;
+        const X = model.X;
+        const e = model.residuals;
+        const n = X.length, p = X[0].length;
+        const Xm = new M(X);
+        // Build B = X' diag(omega) X  where omega_i = e_i² / (1 - h_i)²
+        const B = new Array(p).fill(0).map(() => new Array(p).fill(0));
+        for (let i = 0; i < n; i++) {
+          const w = (e[i] * e[i]) / Math.max(1e-15, (1 - lev[i]) ** 2);
+          for (let r = 0; r < p; r++) {
+            const xri = X[i][r];
+            for (let c = 0; c < p; c++) B[r][c] += xri * X[i][c] * w;
+          }
+        }
+        const Bm  = new M(B);
+        // V = (X'X)⁻¹ B (X'X)⁻¹
+        const V = XtXinv.mmul(Bm).mmul(XtXinv);
+        const se = new Array(p);
+        for (let i = 0; i < p; i++) se[i] = Math.sqrt(V.get(i, i));
+        // Recompute t / p / CI with HC3 SE.
+        const dof = n - p;
+        const tStats = model.beta.map((b, i) => b / se[i]);
+        const pVals  = tStats.map((t) => NumLib.tPvalue2(t, dof));
+        // Reuse t-quantile from model.ci (we don't have ciLevel here directly,
+        // so derive from the existing |t-stat| at one CI bound — acceptable).
+        const tCrit = model.ci[0] && Number.isFinite(model.ci[0][0])
+          ? Math.abs(model.beta[0] - model.ci[0][0]) / Math.max(1e-15, model.se[0])
+          : 1.96;
+        const ci = model.beta.map((b, i) => [b - tCrit * se[i], b + tCrit * se[i]]);
+        return { se, t: tStats, p: pVals, ci };
+      }
+
+      /* ---- Top-level orchestrator ---- */
+      function compute(model) {
+        if (!model || !model.X) return;
+        const { lev, XtXinv } = leverages(model.X);
+        const stud   = studentized(model.residuals, model.rmse, lev);
+        const cooks  = cooksDistance(stud, lev, model.spec.p);
+        const vif    = vifs(model.X, model.spec.predictorNames, model.spec.hasIntercept);
+        const dw     = durbinWatson(model.residuals);
+        const bp     = breuschPagan(model);
+        const jb     = jarqueBera(model.residuals);
+        const sw     = shapiroWilk(model.residuals);
+
+        const n = model.spec.n, p = model.spec.p;
+        const cookThreshold     = 4 / n;
+        const leverageThreshold = (2 * p) / n;
+        const influentialIdx    = [];
+        for (let i = 0; i < n; i++) if (cooks[i] > cookThreshold) influentialIdx.push(i);
+
+        let hc3 = null;
+        if (model.robustSE === true) hc3 = hc3SE(model, lev, XtXinv);
+
+        model.diagnostics = {
+          leverage: lev,
+          studResid: stud,
+          cooks,
+          vif,
+          durbinWatson: dw,
+          bp, jb, sw,
+          influentialIdx,
+          leverageThreshold,
+          cookThreshold,
+          hc3,
+        };
+      }
+
+      return { compute, _internal: { leverages, jarqueBera, shapiroWilk, breuschPagan, durbinWatson, vifs } };
     })();
 
     const Plots = (function () {
@@ -2155,6 +2443,10 @@
               dropped:   design.dropped,
               warnings:  design.warnings,
             });
+            // Carry the robust-SE preference onto the model so Diag.compute
+            // knows to materialise the HC3 bundle (used by Coefficients
+            // tab when the user has the toggle on).
+            model.robustSE = this.config.robustSE;
             Diag.compute(model);
             model.interp = Interpret.run(model);
             this.model = model;
