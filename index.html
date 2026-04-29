@@ -604,9 +604,10 @@
          ============================================================ -->
     <section class="app-content">
 
-      <!-- Tab strip -->
+      <!-- Tab strip — hidden tabs (selftest) accessible only via direct
+           link / footer / URL hash, not via the strip itself. -->
       <nav class="tab-strip" role="tablist">
-        <template x-for="t in tabs" :key="t.key">
+        <template x-for="t in tabs.filter(t => !t.hidden)" :key="t.key">
           <button :class="{ active: ui.activeTab === t.key }"
                   :disabled="t.requiresModel && !model"
                   @click="setTab(t.key)"
@@ -1224,6 +1225,84 @@
         </p>
       </div>
 
+      <!-- Tab: Self-test (hidden from the strip; reachable via footer link or #selftest) -->
+      <div class="tab-panel" x-show="ui.activeTab === 'selftest'">
+        <article class="panel">
+          <h2 class="panel-title" style="display: flex; gap: 0.75rem; align-items: center">
+            Numerical-accuracy self-tests
+            <span class="pill"
+                  :class="ui.selfTestResults && ui.selfTestResults.fail === 0 ? 'note' : (ui.selfTestResults ? 'warn' : 'info')"
+                  style="font-size: 0.7rem">
+              <span class="dot"></span>
+              <span x-show="ui.selfTestRunning">running…</span>
+              <span x-show="!ui.selfTestRunning && !ui.selfTestResults">not run</span>
+              <span x-show="ui.selfTestResults"
+                    x-text="ui.selfTestResults && (ui.selfTestResults.fail === 0 ? ('ALL ' + ui.selfTestResults.total + ' TESTS PASS') : (ui.selfTestResults.fail + ' / ' + ui.selfTestResults.total + ' FAIL'))"></span>
+            </span>
+          </h2>
+          <p style="font-size: 0.85rem; color: var(--pico-muted-color); margin-top: 0.25rem">
+            Validates regression coefficients against
+            <a href="https://www.itl.nist.gov/div898/strd/" target="_blank" rel="noopener">NIST StRD</a>
+            certified values, mtcars OLS against R lm() canonical output, and the
+            distribution functions against R 4.x reference points. Each test
+            shows our value vs the reference, with relative error and a
+            pass/fail at the configured tolerance.
+          </p>
+          <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem">
+            <button @click="runSelfTest()" :disabled="ui.selfTestRunning"
+                    x-text="ui.selfTestRunning ? 'Running…' : (ui.selfTestResults ? 'Re-run' : 'Run self-tests')"
+                    style="margin: 0; padding: 0.4rem 1rem"></button>
+            <span x-show="ui.selfTestResults"
+                  style="font-size: 0.78rem; align-self: center; color: var(--pico-muted-color)">
+              Last ran <span x-text="ui.selfTestResults && new Date(ui.selfTestResults.ranAt).toLocaleTimeString()"></span>
+            </span>
+          </div>
+        </article>
+
+        <template x-for="g in (ui.selfTestResults ? ui.selfTestResults.groups : [])" :key="g.id">
+          <article class="panel">
+            <h3 style="margin: 0 0 0.5rem 0; font-size: 0.95rem; display: flex; gap: 0.5rem; align-items: center">
+              <span x-text="g.label"></span>
+              <span class="pill"
+                    :class="g.tests.every(t => t.pass) ? 'note' : 'critical'"
+                    style="font-size: 0.65rem">
+                <span x-text="g.tests.filter(t => t.pass).length + ' / ' + g.tests.length + ' pass'"></span>
+              </span>
+            </h3>
+            <div style="overflow-x: auto">
+              <table class="coef-table">
+                <thead>
+                  <tr>
+                    <th class="name">Test</th>
+                    <th>Got</th>
+                    <th>Reference</th>
+                    <th>Tol</th>
+                    <th>Rel error</th>
+                    <th>Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="(t, i) in g.tests" :key="i">
+                    <tr :class="{ sig: t.pass }">
+                      <td class="name" x-text="t.name"></td>
+                      <td x-text="fmt(t.got, 6)"></td>
+                      <td x-text="fmt(t.want, 6)"></td>
+                      <td x-text="t.tol.toExponential(0)"></td>
+                      <td x-text="Number.isFinite(t.rel) ? t.rel.toExponential(2) : '—'"></td>
+                      <td>
+                        <span class="pill" :class="t.pass ? 'note' : 'critical'"
+                              style="font-size: 0.7rem"
+                              x-text="t.pass ? 'PASS' : 'FAIL'"></span>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </template>
+      </div>
+
       <!-- Tab: About -->
       <div class="tab-panel" x-show="ui.activeTab === 'about'">
         <article class="panel">
@@ -1261,8 +1340,8 @@
       </span>
       <span class="spacer"></span>
       <a href="#selftest"
-         @click.prevent="ui.activeTab = 'about'"
-         title="Run NIST validation self-tests (Step 15)">Run self-tests</a>
+         @click.prevent="setTab('selftest'); runSelfTest()"
+         title="Run NIST StRD validation + distribution-function tests">Run self-tests</a>
     </footer>
 
     <!-- ============================================================
@@ -4391,10 +4470,191 @@
       return { STEPS, LOGISTIC_STEPS, start, next, prev, exit, currentStep, totalSteps, preconditionMet };
     })();
 
+    /* ===== 9. SelfTest =====
+       Numerical-accuracy validation harness. Runs at index.html#selftest.
+
+       Three test categories:
+         NIST    bundled NIST StRD reference datasets vs certified
+                 β / SE / RSS values. Includes Longley (cond ≈ 5×10⁹),
+                 Norris (well-conditioned), Wampler1 (perfect-fit
+                 polynomial degree 5).
+         R       fit mtcars (mpg ~ wt + hp + cyl) and compare to R
+                 lm() canonical values.
+         Distributions  20 reference points each from R's
+                        pnorm / qnorm / pt / pf / pchisq.
+
+       Each test has tol (relative for non-zero values, absolute when
+       reference is 0). Pass/fail is computed and surfaced as a table
+       on the SelfTest page. */
     const SelfTest = (function () {
-      return {
-        run: _NI("SelfTest.run", 15),
+
+      // ---- NIST Norris (linear, well-conditioned) ----
+      // Source: https://www.itl.nist.gov/div898/strd/lls/data/Norris.shtml
+      // 36 obs, fit y ~ x + intercept.
+      const NORRIS_X = [
+        0.2, 337.4, 118.2, 884.6, 10.1, 226.5, 666.3, 996.3, 448.6, 777.0,
+        558.2,   0.4, 0.6, 775.5, 666.9, 338.0, 447.5, 11.6, 556.0, 228.1,
+        995.8, 887.6, 120.2, 0.3,  0.3, 556.8, 339.1, 887.2, 999.0, 779.0,
+         11.1, 118.3, 229.2, 669.1, 448.9, 0.5,
+      ];
+      const NORRIS_Y = [
+        0.1, 338.8, 118.1, 888.0, 9.2, 228.1, 668.5, 998.5, 449.1, 778.9,
+        559.2,   0.3, 0.1, 778.1, 668.8, 339.3, 448.9, 10.8, 557.7, 228.3,
+        998.0, 888.8, 119.6, 0.3,  0.6, 557.6, 339.3, 888.0, 998.5, 778.9,
+         10.2, 117.6, 228.9, 668.4, 449.2, 0.2,
+      ];
+      const NORRIS_CERT = {
+        beta:  [-0.262323073774029, 1.00211681802045],
+        se:    [0.232818234301152, 0.000429796848199],
+        rss:   26.6173985737081,
+        r2:    0.999993745883712,   // 1 − RSS/TSS computed from certified
       };
+
+      // ---- NIST Wampler1 (perfect-fit polynomial degree 5) ----
+      // y = 1 + x + x² + x³ + x⁴ + x⁵ exactly; 21 obs, x = 0..20.
+      // Source: https://www.itl.nist.gov/div898/strd/lls/data/Wampler1.shtml
+      const WAMPLER1_X = Array.from({ length: 21 }, (_, i) => i);
+      const WAMPLER1_Y = WAMPLER1_X.map((x) => 1 + x + x * x + x * x * x + x * x * x * x + x * x * x * x * x);
+      const WAMPLER1_CERT = {
+        beta: [1, 1, 1, 1, 1, 1],
+        rss:  0,
+        r2:   1.0,
+      };
+
+      // ---- 20 reference points per distribution function from R 4.x ----
+      const DIST_TESTS = [
+        // [name, fn(x...), [args...], expected, abs-tol]
+        ["normCDF(0)",        () => NumLib.normCDF(0),       0.5,            1e-15],
+        ["normCDF(1)",        () => NumLib.normCDF(1),       0.8413447461,   1e-7 ],
+        ["normCDF(1.96)",     () => NumLib.normCDF(1.96),    0.9750021049,   1e-7 ],
+        ["normCDF(-2.5)",     () => NumLib.normCDF(-2.5),    0.00620966532577616,  3e-6 ],
+        ["normCDF(3)",        () => NumLib.normCDF(3),       0.9986501020,   1e-7 ],
+        ["normInv(0.5)",      () => NumLib.normInv(0.5),     0,              1e-9 ],
+        ["normInv(0.025)",    () => NumLib.normInv(0.025),  -1.95996398,     1e-7 ],
+        ["normInv(0.975)",    () => NumLib.normInv(0.975),   1.95996398,     1e-7 ],
+        ["normInv(0.999)",    () => NumLib.normInv(0.999),   3.09023230,     1e-7 ],
+        ["tCDF(0,10)",        () => NumLib.tCDF(0, 10),      0.5,            1e-12],
+        ["tCDF(2,10)",        () => NumLib.tCDF(2, 10),      0.9633059829,   1e-4 ],
+        ["tCDF(-2.228,10)",   () => NumLib.tCDF(-2.228, 10), 0.02500588591, 1e-6 ],
+        ["tCDF(2.5,30)",      () => NumLib.tCDF(2.5, 30),    0.9909421755,   1e-4 ],
+        ["fCDF(1,10,10)",     () => NumLib.fCDF(1, 10, 10),  0.5,            1e-9 ],
+        ["fCDF(2.5,5,20)",    () => NumLib.fCDF(2.5, 5, 20), 0.9350729,      1e-4 ],
+        ["fCDF(0,5,20)",      () => NumLib.fCDF(0, 5, 20),   0,              1e-15],
+        ["chi2CDF(0,5)",      () => NumLib.chi2CDF(0, 5),    0,              1e-15],
+        ["chi2CDF(7.815,3)",  () => NumLib.chi2CDF(7.815, 3),0.95,           1e-3 ],
+        ["chi2CDF(15,10)",    () => NumLib.chi2CDF(15, 10),  0.8678944,      1e-4 ],
+        ["chi2CDF(11.07,5)",  () => NumLib.chi2CDF(11.07, 5),0.9499973,      1e-4 ],
+      ];
+
+      function _rel(got, want) {
+        if (Math.abs(want) < 1e-12) return Math.abs(got - want);     // absolute
+        return Math.abs(got - want) / Math.abs(want);
+      }
+
+      function _runNorris() {
+        const rows = NORRIS_X.map((x, i) => ({ x, y: NORRIS_Y[i] }));
+        const d = Stats.buildDesign(rows, { response: "y", predictors: ["x"], intercept: true, family: "ols", missingPolicy: "listwise" });
+        const m = Stats.fitOLS(d.X, d.y, { intercept: true, ciLevel: 0.95, family: "ols", names: d.names, response: "y" });
+        const t = [];
+        const tol = 1e-10;
+        t.push(_check("Norris β intercept", m.beta[0], NORRIS_CERT.beta[0], tol));
+        t.push(_check("Norris β x",         m.beta[1], NORRIS_CERT.beta[1], tol));
+        t.push(_check("Norris SE intercept", m.se[0], NORRIS_CERT.se[0], 1e-8));
+        t.push(_check("Norris SE x",         m.se[1], NORRIS_CERT.se[1], 1e-8));
+        t.push(_check("Norris RSS",         m.rss,    NORRIS_CERT.rss,  1e-8));
+        t.push(_check("Norris R²",          m.r2,     NORRIS_CERT.r2,   1e-9));
+        return t;
+      }
+
+      function _runLongley() {
+        const rows = SAMPLES.longley.rows;
+        const d = Stats.buildDesign(rows, { response: "Empl", predictors: ["Defl","GNP","Unemp","Armed","Pop","Year"], intercept: true, family: "ols", missingPolicy: "listwise" });
+        const m = Stats.fitOLS(d.X, d.y, { intercept: true, ciLevel: 0.95, family: "ols", names: d.names, response: "Empl" });
+        const cert = {
+          "(Intercept)": -3482258.63459582,
+          "Defl":         15.0618722713733,
+          "GNP":          -0.0358191792925910,
+          "Unemp":        -2.02022980381581,
+          "Armed":        -1.03322687107160,
+          "Pop":          -0.0511041056535837,
+          "Year":       1829.15146461356,
+        };
+        const t = [];
+        // Longley is severely ill-conditioned (cond ≈ 5e9); NIST passes
+        // require ≥ 6 digits of agreement.
+        const tol = 1e-6;
+        for (let i = 0; i < m.spec.predictorNames.length; i++) {
+          const n = m.spec.predictorNames[i];
+          t.push(_check(`Longley β ${n}`, m.beta[i], cert[n], tol));
+        }
+        t.push(_check("Longley RSS", m.rss, 836424.055505915, 1e-6));
+        return t;
+      }
+
+      function _runWampler1() {
+        // Manually expand x..x⁵ since spec.polynomialDegree wires through buildDesign.
+        const rows = WAMPLER1_X.map((x, i) => ({ x, y: WAMPLER1_Y[i] }));
+        const d = Stats.buildDesign(rows, { response: "y", predictors: ["x"], intercept: true, family: "polynomial", polynomialDegree: 5, missingPolicy: "listwise" });
+        const m = Stats.fitOLS(d.X, d.y, { intercept: true, ciLevel: 0.95, family: "polynomial", names: d.names, response: "y" });
+        const t = [];
+        // Perfect-fit case: every β should be exactly 1, RSS exactly 0.
+        // QR-based solver should reach 1e-9 here.
+        for (let i = 0; i < 6; i++) t.push(_check(`Wampler1 β${i}`, m.beta[i], 1, 1e-8));
+        t.push(_check("Wampler1 RSS (should be ≈0)", m.rss, 0, 1e-10));
+        t.push(_check("Wampler1 R² (should be 1)",   m.r2,  1, 1e-12));
+        return t;
+      }
+
+      function _runMtcars() {
+        const rows = SAMPLES.mtcars.rows;
+        const d = Stats.buildDesign(rows, { response: "mpg", predictors: ["wt","hp","cyl"], intercept: true, family: "ols", missingPolicy: "listwise" });
+        const m = Stats.fitOLS(d.X, d.y, { intercept: true, ciLevel: 0.95, family: "ols", names: d.names, response: "mpg" });
+        const cert = {
+          "(Intercept)": { beta: 38.7517874, se: 1.7869115 },
+          "wt":          { beta: -3.1669731, se: 0.7405133 },
+          "hp":          { beta: -0.0180381, se: 0.0118762 },
+          "cyl":         { beta: -0.9416168, se: 0.5509159 },
+        };
+        const t = [];
+        for (let i = 0; i < m.spec.predictorNames.length; i++) {
+          const n = m.spec.predictorNames[i];
+          t.push(_check(`mtcars β ${n}`, m.beta[i], cert[n].beta, 1e-6));
+          t.push(_check(`mtcars SE ${n}`, m.se[i],   cert[n].se,   1e-3));
+        }
+        t.push(_check("mtcars R² (R lm 0.84314998)", m.r2, 0.84314998, 1e-6));
+        t.push(_check("mtcars F (R lm 50.17)",       m.fStat, 50.17084, 1e-3));
+        return t;
+      }
+
+      function _runDistributions() {
+        return DIST_TESTS.map(([name, fn, want, tol]) => {
+          let got = NaN;
+          try { got = fn(); } catch (e) { got = NaN; }
+          return _check(name, got, want, tol);
+        });
+      }
+
+      function _check(name, got, want, tol) {
+        const ok = Number.isFinite(got) && Number.isFinite(want)
+          ? _rel(got, want) <= tol
+          : got === want;
+        return { name, got, want, tol, rel: Number.isFinite(got) && Number.isFinite(want) ? _rel(got, want) : NaN, pass: ok };
+      }
+
+      function run() {
+        const groups = [
+          { id: "norris",   label: "NIST Norris (well-conditioned linear, n=36)",        tests: _runNorris() },
+          { id: "longley",  label: "NIST Longley (ill-conditioned, cond ≈ 5×10⁹, n=16)", tests: _runLongley() },
+          { id: "wampler1", label: "NIST Wampler1 (perfect-fit polynomial degree 5)",    tests: _runWampler1() },
+          { id: "mtcars",   label: "R lm() canonical values (mtcars: mpg ~ wt+hp+cyl)",  tests: _runMtcars() },
+          { id: "dist",     label: "Distribution functions (vs R pnorm / qnorm / pt / pf / pchisq, 20 points)", tests: _runDistributions() },
+        ];
+        let pass = 0, fail = 0;
+        for (const g of groups) for (const t of g.tests) (t.pass ? pass++ : fail++);
+        return { pass, fail, total: pass + fail, groups, ranAt: new Date().toISOString() };
+      }
+
+      return { run, NORRIS_CERT, WAMPLER1_CERT };
     })();
 
     /* ===== 10. app() — Alpine factory ===== */
@@ -4402,13 +4662,14 @@
       return {
         /* ---- Tab definitions (static) ---- */
         tabs: [
-          { key: "summary",        label: "Summary",        requiresModel: false },
-          { key: "coefficients",   label: "Coefficients",   requiresModel: true  },
-          { key: "diagnostics",    label: "Diagnostics",    requiresModel: true  },
-          { key: "plots",          label: "Plots",          requiresModel: true  },
-          { key: "predictions",    label: "Predictions",    requiresModel: true  },
-          { key: "interpretation", label: "Interpretation", requiresModel: true  },
-          { key: "about",          label: "About",          requiresModel: false },
+          { key: "summary",        label: "Summary",        requiresModel: false, hidden: false },
+          { key: "coefficients",   label: "Coefficients",   requiresModel: true,  hidden: false },
+          { key: "diagnostics",    label: "Diagnostics",    requiresModel: true,  hidden: false },
+          { key: "plots",          label: "Plots",          requiresModel: true,  hidden: false },
+          { key: "predictions",    label: "Predictions",    requiresModel: true,  hidden: false },
+          { key: "interpretation", label: "Interpretation", requiresModel: true,  hidden: false },
+          { key: "about",          label: "About",          requiresModel: false, hidden: false },
+          { key: "selftest",       label: "Self-test",      requiresModel: false, hidden: true  },
         ],
 
         /* ---- Header / sample loader ---- */
@@ -4473,6 +4734,8 @@
           predInputs: {},
           predResult: null,
           predError: "",
+          selfTestResults: null,
+          selfTestRunning: false,
         },
 
         /* ---- Errors collected from fit / parse / validation ---- */
@@ -4513,9 +4776,11 @@
             document.documentElement.setAttribute("data-theme", "dark");
           }
 
-          // Self-test deep link: index.html#selftest jumps straight there once Step 15 ships.
+          // Self-test deep link.  index.html#selftest opens the hidden
+          // SelfTest tab and runs the harness immediately.
           if (window.location.hash === "#selftest") {
-            this.ui.activeTab = "about";
+            this.ui.activeTab = "selftest";
+            this.$nextTick(() => this.runSelfTest());
           }
 
           this.bootStatus = this.availableSamples.length > 0
@@ -5010,6 +5275,26 @@
             ? ` Of ${totalSlopes} predictor${totalSlopes === 1 ? "" : "s"}, <strong>${sigCount}</strong> ${sigCount === 1 ? "is" : "are"} significant at α = 0.05.`
             : "";
           return `The model explains <strong>${r2}%</strong> of the variance in <code>${m.spec.response}</code> (adjusted R² = ${adj}%). ${fitVerdict}${sigPart}`;
+        },
+
+        /* =========================================================
+           Self-test — runs SelfTest.run() and stashes the results
+           for the SelfTest panel template.
+           ========================================================= */
+        runSelfTest() {
+          this.ui.selfTestRunning = true;
+          this.ui.selfTestResults = null;
+          // Defer so the "Running…" UI flashes before the synchronous
+          // crunch (totals fit in well under a second on any laptop).
+          this.$nextTick(() => {
+            try {
+              this.ui.selfTestResults = SelfTest.run();
+            } catch (e) {
+              this._reportError("SelfTest.run failed: " + e.message, "runSelfTest");
+            } finally {
+              this.ui.selfTestRunning = false;
+            }
+          });
         },
 
         /* =========================================================
