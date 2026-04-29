@@ -880,9 +880,53 @@
 
       <!-- Tab: Plots -->
       <div class="tab-panel" x-show="ui.activeTab === 'plots'">
-        <article class="panel">
+        <article class="panel" x-show="!model">
           <h2 class="panel-title">Diagnostic plots</h2>
-          <p style="color: var(--pico-muted-color)">All Plotly figures arrive in Steps 10–11.</p>
+          <p style="color: var(--pico-muted-color)">Fit a model first.</p>
+        </article>
+
+        <article class="panel" x-show="model">
+          <h2 class="panel-title">Diagnostic plots</h2>
+          <div class="plot-grid">
+            <!-- Scatter+fit only renders for simple linear regression
+                 (intercept + 1 predictor). For multiple regression the
+                 factory writes a "shown for simple linear only" notice
+                 into the div, so we always reserve the slot. -->
+            <div>
+              <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
+                Scatter with fit + 95 % CI / PI bands
+              </h3>
+              <div id="plot-scatterFit" class="plot"></div>
+            </div>
+
+            <div>
+              <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
+                Residuals vs Fitted (with LOWESS)
+              </h3>
+              <div id="plot-residFitted" class="plot"></div>
+            </div>
+
+            <div>
+              <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
+                Normal Q-Q
+              </h3>
+              <div id="plot-qqNormal" class="plot"></div>
+            </div>
+
+            <div>
+              <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
+                Scale-Location
+              </h3>
+              <div id="plot-scaleLocation" class="plot"></div>
+            </div>
+          </div>
+
+          <p style="font-size: 0.75rem; color: var(--pico-muted-color); margin-top: 1rem">
+            More figures (residuals-vs-leverage with Cook's contours,
+            histogram, correlation heatmap, partial-regression plots,
+            predicted-vs-actual, coefficient forest, influence index,
+            ROC, calibration) arrive in Steps 11 / 13.
+          </p>
         </article>
       </div>
 
@@ -2664,13 +2708,28 @@
         /* =========================================================
            Tabs / theme
            ========================================================= */
-        setTab(key) { this.ui.activeTab = key; },
+        setTab(key) {
+          this.ui.activeTab = key;
+          // The Plots tab keeps its divs in the DOM via x-show, but
+          // Plotly wants the divs visible (non-zero size) to size the
+          // figures correctly. Re-dispatch renderAll on activation so
+          // the layout is right whether this is the first visit or a
+          // refit happened on another tab.
+          if (key === "plots" && this.model) {
+            this.$nextTick(() => Plots.renderAll(this.model));
+          }
+        },
 
         toggleTheme() {
           this.ui.darkMode = !this.ui.darkMode;
           const t = this.ui.darkMode ? "dark" : "light";
           document.documentElement.setAttribute("data-theme", t);
           localStorage.setItem("regapp-theme", t);
+          // Re-render any open Plotly figures so colours pick up the
+          // new theme (font + grid) without a manual refit.
+          if (this.model && this.ui.activeTab === "plots") {
+            this.$nextTick(() => Plots.renderAll(this.model));
+          }
         },
 
         /* =========================================================
