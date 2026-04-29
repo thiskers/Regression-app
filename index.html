@@ -919,13 +919,61 @@
               </h3>
               <div id="plot-scaleLocation" class="plot"></div>
             </div>
+
+            <div>
+              <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
+                Residuals vs Leverage (with Cook's contours)
+              </h3>
+              <div id="plot-residLeverage" class="plot"></div>
+            </div>
+
+            <div>
+              <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
+                Residual distribution + N(0, σ̂)
+              </h3>
+              <div id="plot-residHistogram" class="plot"></div>
+            </div>
+
+            <div>
+              <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
+                Predicted vs Actual
+              </h3>
+              <div id="plot-predictedActual" class="plot"></div>
+            </div>
+
+            <div>
+              <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
+                Influence index (Cook's by row)
+              </h3>
+              <div id="plot-influenceIndex" class="plot"></div>
+            </div>
+
+            <div>
+              <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
+                Predictor correlation heatmap
+              </h3>
+              <div id="plot-corrHeatmap" class="plot"></div>
+            </div>
+
+            <div>
+              <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
+                Coefficient forest (β with 95 % CI)
+              </h3>
+              <div id="plot-coefForest" class="plot"></div>
+            </div>
+
+            <!-- Partial-regression plots span full width since they
+                 are themselves a small-multiples grid. -->
+            <div style="grid-column: 1 / -1">
+              <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
+                Partial regression (added-variable plots)
+              </h3>
+              <div id="plot-partialRegression" class="plot" style="min-height: 240px"></div>
+            </div>
           </div>
 
           <p style="font-size: 0.75rem; color: var(--pico-muted-color); margin-top: 1rem">
-            More figures (residuals-vs-leverage with Cook's contours,
-            histogram, correlation heatmap, partial-regression plots,
-            predicted-vs-actual, coefficient forest, influence index,
-            ROC, calibration) arrive in Steps 11 / 13.
+            ROC and calibration plots ship in Step 13 with logistic regression.
           </p>
         </article>
       </div>
@@ -2690,6 +2738,99 @@
         }
       }
 
+      /* ---- Figure 9: predicted vs actual.
+             Tight cloud around the y = x reference line means good fit.
+             Hovers carry the row index for outlier identification.      */
+      function predictedActual(model, el) {
+        const yhat = model.fitted;
+        const y    = model.y;
+        const all = yhat.concat(y);
+        const lo = Math.min(...all), hi = Math.max(...all);
+        const traces = [
+          { x: [lo, hi], y: [lo, hi], mode: "lines", name: "y = x",
+            line: { color: C.ref, dash: "dash", width: 1.5 }, hoverinfo: "skip" },
+          { x: yhat, y: y, mode: "markers", name: "obs",
+            marker: { size: 6, color: C.point, opacity: 0.85 },
+            customdata: yhat.map((_, i) => i + 1),
+            hovertemplate: "row %{customdata}<br>predicted=%{x:.3f}<br>actual=%{y:.3f}<extra></extra>" },
+        ];
+        const layout = Object.assign(_theme(), {
+          title: { text: "Predicted vs Actual", font: { size: 14 } },
+          xaxis: Object.assign({}, _theme().xaxis, { title: { text: `Predicted ${model.spec.response}` } }),
+          yaxis: Object.assign({}, _theme().yaxis, { title: { text: `Actual ${model.spec.response}` } }),
+        });
+        window.Plotly.newPlot(el, traces, layout, _config);
+      }
+
+      /* ---- Figure 10: coefficient forest plot.
+             Horizontal bars at β with 95 % CI error bars, sorted as in
+             the Coefficients table. Vertical zero line as significance
+             reference. Skipped for ≤ 1 slope predictor — bar with one
+             entry doesn't add information beyond the coef table.        */
+      function coefForest(model, el) {
+        const startCol = model.spec.hasIntercept ? 1 : 0;
+        const idx = [];
+        for (let i = startCol; i < model.spec.predictorNames.length; i++) idx.push(i);
+        if (idx.length < 2) { _placeholder(el, "Coefficient forest is shown for ≥ 2 predictors."); return; }
+
+        // Plot from bottom (last in idx) to top (first) for natural reading order.
+        const yLabels = idx.map((i) => model.spec.predictorNames[i]).reverse();
+        const betas   = idx.map((i) => model.beta[i]).reverse();
+        const errLo   = idx.map((i) => model.beta[i] - model.ci[i][0]).reverse();
+        const errHi   = idx.map((i) => model.ci[i][1] - model.beta[i]).reverse();
+        const colours = idx.map((i) => model.p[i] < 0.05 ? C.point : C.ref).reverse();
+
+        const traces = [
+          { y: yLabels, x: betas, type: "scatter", mode: "markers",
+            marker: { size: 9, color: colours, line: { color: "white", width: 1 } },
+            error_x: { type: "data", symmetric: false, array: errHi, arrayminus: errLo,
+                      color: colours, thickness: 1.5, width: 6 },
+            customdata: idx.map((i) => [model.p[i], model.se[i]]).reverse(),
+            hovertemplate: "%{y}<br>β = %{x:.4f}<br>SE = %{customdata[1]:.4f}<br>p = %{customdata[0]:.4f}<extra></extra>",
+            showlegend: false },
+        ];
+        const layout = Object.assign(_theme(), {
+          title: { text: "Coefficient forest (β with 95 % CI)", font: { size: 14 } },
+          xaxis: Object.assign({}, _theme().xaxis, { title: { text: "β estimate" } }),
+          yaxis: Object.assign({}, _theme().yaxis, { automargin: true }),
+          shapes: [{ type: "line", x0: 0, x1: 0, y0: -0.5, y1: yLabels.length - 0.5,
+                     line: { color: C.ref, dash: "dot", width: 1 } }],
+          showlegend: false,
+        });
+        window.Plotly.newPlot(el, traces, layout, _config);
+      }
+
+      /* ---- Figure 11: influence index plot.
+             Bar chart of Cook's distance per observation with a dashed
+             threshold line at 4/n. Bars over the threshold are coloured
+             red so flagged rows are immediately visible.                */
+      function influenceIndex(model, el) {
+        const dx = model.diagnostics;
+        if (!dx || !dx.cooks) { _placeholder(el, "Diagnostics not yet computed."); return; }
+        const rows  = dx.cooks.map((_, i) => i + 1);
+        const vals  = dx.cooks.slice();
+        const thr   = dx.cookThreshold;
+        const cols  = vals.map((v) => v > thr ? "#dc2626" : C.point);
+        const traces = [
+          { x: rows, y: vals, type: "bar", marker: { color: cols },
+            customdata: rows.map((r) => r),
+            hovertemplate: "row %{customdata}<br>Cook's D = %{y:.4f}<extra></extra>",
+            showlegend: false },
+        ];
+        const layout = Object.assign(_theme(), {
+          title: { text: "Cook's distance by observation", font: { size: 14 } },
+          xaxis: Object.assign({}, _theme().xaxis, { title: { text: "Row index" } }),
+          yaxis: Object.assign({}, _theme().yaxis, { title: { text: "Cook's distance" } }),
+          shapes: [{ type: "line", x0: 0, x1: rows.length + 1, y0: thr, y1: thr,
+                     line: { color: C.warn, dash: "dash", width: 1.5 } }],
+          annotations: [{ xref: "paper", yref: "y", x: 1, y: thr, xanchor: "right", yanchor: "bottom",
+                          text: `4/n = ${thr.toFixed(4)}`, showarrow: false,
+                          font: { size: 10, color: C.warn } }],
+          showlegend: false,
+        });
+        window.Plotly.newPlot(el, traces, layout, _config);
+      }
+
       /* ---- renderAll(model) — orchestrator.
              Walks the known plot div ids and dispatches. Plots whose
              div doesn't exist (yet — e.g. Step 11 plots) are skipped.
@@ -2707,6 +2848,9 @@
           ["plot-residHistogram",    residHistogram],
           ["plot-corrHeatmap",       corrHeatmap],
           ["plot-partialRegression", partialRegression],
+          ["plot-predictedActual",   predictedActual],
+          ["plot-coefForest",        coefForest],
+          ["plot-influenceIndex",    influenceIndex],
         ];
         for (const [id, fn] of dispatch) {
           const el = get(id);
@@ -2719,10 +2863,8 @@
         renderAll,
         scatterFit, residFitted, qqNormal, scaleLocation,
         residLeverage, residHistogram, corrHeatmap, partialRegression,
-        // Step 11b ships the remaining three; Step 13 ships ROC + calibration.
-        predictedActual:   _NI("Plots.predictedActual",   11),
-        coefForest:        _NI("Plots.coefForest",        11),
-        influenceIndex:    _NI("Plots.influenceIndex",    11),
+        predictedActual, coefForest, influenceIndex,
+        // Step 13 ships ROC + calibration for logistic.
         roc:               _NI("Plots.roc",               13),
         calibration:       _NI("Plots.calibration",       13),
       };
