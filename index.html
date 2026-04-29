@@ -1280,7 +1280,43 @@
       </div>
     </div>
 
-    <div class="tutorial-overlay" x-show="ui.tutorialActive" x-cloak></div>
+    <!-- Tutorial spotlight overlay. The pointer-events:none container
+         lets clicks pass through to the highlighted control. The
+         popover absorbs its own clicks. -->
+    <div class="tutorial-overlay" x-show="ui.tutorialActive" x-cloak>
+      <div id="tutorial-popover" class="tutorial-popover" x-show="tutorialStepObj">
+        <h3 style="margin: 0 0 0.4rem 0; font-size: 1rem; line-height: 1.3"
+            x-text="tutorialStepObj && tutorialStepObj.title"></h3>
+        <p style="margin: 0; font-size: 0.85rem; line-height: 1.5"
+           x-html="tutorialStepObj && tutorialStepObj.body"></p>
+        <div class="controls">
+          <span style="font-size: 0.72rem; color: var(--pico-muted-color); align-self: center"
+                x-text="((ui.tutorialStep + 1) + ' / ' + tutorialTotal)"></span>
+          <span class="spacer"></span>
+          <button class="secondary" @click="tutorialExit()" title="Skip the tutorial (Esc)">Skip</button>
+          <button class="secondary" @click="tutorialPrev()" :disabled="ui.tutorialStep === 0">Prev</button>
+          <button @click="tutorialNext()"
+                  :disabled="!tutorialReady"
+                  :title="!tutorialReady ? 'Complete the highlighted action to continue' : ''"
+                  x-text="ui.tutorialStep === tutorialTotal - 1 ? 'Done' : 'Next'"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- First-run prompt (one-time): offers the tutorial on initial load. -->
+    <div class="modal-backdrop" x-show="ui.firstRunPrompt" x-cloak @click.self="dismissFirstRun()">
+      <div class="modal-dialog" style="max-width: 24rem">
+        <h3 style="margin-top: 0">First time here?</h3>
+        <p style="font-size: 0.9rem; margin: 0 0 0.5rem 0">
+          Take a 5-minute guided tour. We'll fit a real OLS model to <code>mtcars</code>,
+          walk through the diagnostic suite, and end at the auto-interpretation.
+        </p>
+        <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem">
+          <button class="secondary" @click="dismissFirstRun()">No thanks</button>
+          <button @click="startTutorial('ols')">Start tutorial</button>
+        </div>
+      </div>
+    </div>
 
   </main>
 
@@ -3844,15 +3880,251 @@
       };
     })();
 
+    /* ===== 8. Tutorial =====
+       Spotlight-overlay walkthrough — pure JS, no third-party deps.
+       Each step in STEPS / LOGISTIC_STEPS specifies a CSS selector for
+       the element to highlight, a title + body, optional onEnter() to
+       mutate app state (load a sample, switch tabs), and an optional
+       precondition() that gates the Next button. The "spotlight" effect
+       is a giant box-shadow on the .tutorial-target class — see CSS.
+       Popover is positioned absolutely via getBoundingClientRect.       */
     const Tutorial = (function () {
-      // No-op until Step 14 so the Tutorial button doesn't throw before then.
-      return {
-        STEPS: [],
-        start() { /* Step 14 */ },
-        next()  { /* Step 14 */ },
-        prev()  { /* Step 14 */ },
-        exit()  { /* Step 14 */ },
-      };
+      let _app = null;
+      let _activeSteps = null;       // either STEPS (OLS) or LOGISTIC_STEPS
+      let _keyHandler = null;
+      let _resizeHandler = null;
+
+      /* ---- 10-step end-to-end OLS tour (mtcars: mpg ~ wt + hp + cyl) ---- */
+      const STEPS = [
+        {
+          id: "welcome", target: null,
+          title: "Welcome to Regression-app",
+          body:  "A 5-minute tour walks you through one full analysis end-to-end on the mtcars sample. Use <strong>Next / Prev</strong> to navigate; press <kbd>Esc</kbd> any time to exit.",
+        },
+        {
+          id: "load-sample",
+          target: 'header select[aria-label="Load sample dataset"]',
+          title: "1. Load a sample dataset",
+          body:  "Pick <code>mtcars</code> from this dropdown. We'll predict <code>mpg</code> from a few car characteristics. (Click Next once mtcars is loaded.)",
+          onEnter: (app) => { /* let the user pick */ },
+          precondition: (app) => app.dataset && app.dataset.name === "mtcars",
+        },
+        {
+          id: "pick-vars",
+          target: ".app-sidebar > section:nth-child(2)",
+          title: "2. Pick variables",
+          body:  "Sample loaders pre-fill these. Response is <code>mpg</code>, predictors are <code>wt</code> + <code>hp</code> + <code>cyl</code> — three correlated continuous variables.",
+          precondition: (app) => app.spec.response && app.spec.predictors.length > 0,
+        },
+        {
+          id: "fit",
+          target: "button.fit-button",
+          title: "3. Fit the model",
+          body:  "Click <strong>Fit model</strong>. We solve β̂ via QR decomposition (numerically stable for ill-conditioned designs) and compute classical inference: SE, t-tests, 95 % CIs, R², F-test, AIC, BIC.",
+          precondition: (app) => app.model !== null,
+        },
+        {
+          id: "summary",
+          target: ".app-content > nav.tab-strip > button:nth-child(1)",
+          title: "4. Read the summary",
+          body:  "<strong>R² = 0.84</strong> — the model explains 84 % of mpg variance. <strong>F p &lt; 1e-10</strong> — the overall model is highly significant. The headline paragraph at the bottom flags 2 influential observations to investigate.",
+          onEnter: (app) => { app.setTab("summary"); },
+        },
+        {
+          id: "coefficients",
+          target: ".app-content > nav.tab-strip > button:nth-child(2)",
+          title: "5. Coefficient table",
+          body:  "Each predictor has β, SE, t, p, 95 % CI, standardised β, and VIF. <code>wt</code> is significant ( <span class='stars' style='color:var(--sev-note-fg)'>*</span> ); <code>hp</code> and <code>cyl</code> are not, after adjusting for the others. Significance: *** p&lt;0.001  ** p&lt;0.01  * p&lt;0.05.",
+          onEnter: (app) => { app.setTab("coefficients"); },
+        },
+        {
+          id: "diagnostics",
+          target: ".app-content > nav.tab-strip > button:nth-child(3)",
+          title: "6. Diagnostic tests",
+          body:  "Each assumption check (Durbin-Watson · Breusch-Pagan · Jarque-Bera · Shapiro-Wilk) gets a colour-coded verdict pill. The Influence panel below shows which rows exceed Cook's 4/n threshold.",
+          onEnter: (app) => { app.setTab("diagnostics"); },
+        },
+        {
+          id: "plots",
+          target: ".app-content > nav.tab-strip > button:nth-child(4)",
+          title: "7. Diagnostic plots",
+          body:  "10 plots: scatter+fit (simple linear only), residuals vs. fitted (LOWESS overlay flags trends), Normal Q-Q, scale-location, residuals vs. leverage with Cook's contours, histogram, predicted-vs-actual, correlation heatmap, coefficient forest, partial-regression panels.",
+          onEnter: (app) => { app.setTab("plots"); },
+        },
+        {
+          id: "predictions",
+          target: ".app-content > nav.tab-strip > button:nth-child(5)",
+          title: "8. Predict on new inputs",
+          body:  "Plug in any wt / hp / cyl and get a predicted mpg with 95 % <strong>CI</strong> (uncertainty in the conditional mean) and 95 % <strong>PI</strong> (uncertainty for a new individual observation — wider).",
+          onEnter: (app) => { app.setTab("predictions"); },
+        },
+        {
+          id: "interpretation",
+          target: ".app-content > nav.tab-strip > button:nth-child(6)",
+          title: "9. Plain-English interpretation",
+          body:  "A rules engine walks the model and produces sectioned narrative: overall fit verdict, per-predictor effect sentences, assumption issues, and concrete recommendations. Click <strong>Copy</strong> to grab the whole thing as text.",
+          onEnter: (app) => { app.setTab("interpretation"); },
+        },
+        {
+          id: "finish", target: null,
+          title: "You're done!",
+          body:  "Try loading <code>anscombe</code> next (4 sets with identical regression stats but visibly different shapes — proves diagnostic plots are mandatory) or <code>iris_binary</code> for the logistic branch tutorial.",
+        },
+      ];
+
+      /* ---- 4-step branch: logistic on iris_binary ---- */
+      const LOGISTIC_STEPS = [
+        {
+          id: "log-welcome", target: null,
+          title: "Logistic regression branch",
+          body:  "When the family is <strong>logistic</strong>, the Coefficients table reports z-tests + 95 % CI for log-odds; the Summary tab shows pseudo-R², AUC, accuracy, deviance, and a confusion matrix; and Plots gains an ROC curve and calibration plot.",
+        },
+        {
+          id: "log-load",
+          target: 'header select[aria-label="Load sample dataset"]',
+          title: "Load iris_binary",
+          body:  "Pick <code>iris_binary</code>. Family auto-switches to <em>logistic</em>; response is <code>Species</code> (versicolor / virginica), predictors are <code>Petal.Length</code> + <code>Petal.Width</code>.",
+          precondition: (app) => app.dataset && app.dataset.name === "Iris (versicolor + virginica)",
+        },
+        {
+          id: "log-fit",
+          target: "button.fit-button",
+          title: "Fit and read the ROC",
+          body:  "Click Fit. AUC ≈ 0.99 — the model nearly perfectly ranks virginica above versicolor. Per-predictor effects are reported as odds-ratios in the Interpretation tab.",
+          onEnter: (app) => { app.setTab("plots"); },
+          precondition: (app) => app.model !== null,
+        },
+        {
+          id: "log-finish", target: null,
+          title: "Try near-separation",
+          body:  "Now try fitting with only <code>Petal.Length</code> as predictor. With more separable classes, β can diverge and the <code>logistic_separation</code> rule fires — a classic logistic pitfall.",
+        },
+      ];
+
+      function _byId(id) { return document.getElementById(id); }
+
+      function _highlight(selector) {
+        document.querySelectorAll(".tutorial-target").forEach((el) => el.classList.remove("tutorial-target"));
+        if (!selector) return null;
+        const el = document.querySelector(selector);
+        if (el) el.classList.add("tutorial-target");
+        return el;
+      }
+
+      function _positionPopover(targetEl) {
+        const pop = _byId("tutorial-popover");
+        if (!pop) return;
+        const popW = pop.offsetWidth || 360;
+        const popH = pop.offsetHeight || 200;
+        const vw = window.innerWidth, vh = window.innerHeight, pad = 12;
+        if (!targetEl) {
+          // Centre on viewport (welcome / finish steps)
+          pop.style.position = "fixed";
+          pop.style.top  = Math.max(pad, (vh - popH) / 2) + "px";
+          pop.style.left = Math.max(pad, (vw - popW) / 2) + "px";
+          return;
+        }
+        const r = targetEl.getBoundingClientRect();
+        let top, left;
+        // Prefer below; fall back to above; then right; then left.
+        if (r.bottom + popH + pad < vh) {
+          top  = r.bottom + pad;
+          left = Math.max(pad, Math.min(vw - popW - pad, r.left));
+        } else if (r.top - popH - pad > 0) {
+          top  = r.top - popH - pad;
+          left = Math.max(pad, Math.min(vw - popW - pad, r.left));
+        } else if (r.right + popW + pad < vw) {
+          top  = Math.max(pad, Math.min(vh - popH - pad, r.top));
+          left = r.right + pad;
+        } else {
+          top  = Math.max(pad, Math.min(vh - popH - pad, r.top));
+          left = Math.max(pad, r.left - popW - pad);
+        }
+        pop.style.position = "fixed";
+        pop.style.top  = top  + "px";
+        pop.style.left = left + "px";
+      }
+
+      function _enter(idx) {
+        if (!_app || !_activeSteps) return;
+        const step = _activeSteps[idx];
+        if (!step) return;
+        if (step.onEnter) { try { step.onEnter(_app); } catch (e) { console.warn("[tutorial]", e); } }
+        // Defer to next tick so any Alpine-driven tab switch / sample
+        // load has rendered before we measure the target.
+        setTimeout(() => {
+          const targetEl = _highlight(step.target);
+          _positionPopover(targetEl);
+        }, 80);
+      }
+
+      function start(app, branch) {
+        _app = app;
+        _activeSteps = (branch === "logistic") ? LOGISTIC_STEPS : STEPS;
+        app.ui.tutorialActive = true;
+        app.ui.tutorialStep = 0;
+        app.ui.tutorialBranch = branch || "ols";
+        // Listeners
+        _keyHandler = (e) => {
+          if (!_app || !_app.ui.tutorialActive) return;
+          if (e.key === "Escape") exit();
+          else if (e.key === "ArrowRight") next();
+          else if (e.key === "ArrowLeft")  prev();
+        };
+        _resizeHandler = () => {
+          if (!_app || !_app.ui.tutorialActive) return;
+          const step = _activeSteps[_app.ui.tutorialStep];
+          if (step) _positionPopover(step.target ? document.querySelector(step.target) : null);
+        };
+        document.addEventListener("keydown", _keyHandler);
+        window.addEventListener("resize", _resizeHandler);
+        _enter(0);
+      }
+
+      function next() {
+        if (!_app || !_activeSteps) return;
+        const cur = _app.ui.tutorialStep;
+        const step = _activeSteps[cur];
+        if (step.precondition && !step.precondition(_app)) return; // gated
+        if (cur >= _activeSteps.length - 1) { exit(); return; }
+        _app.ui.tutorialStep = cur + 1;
+        _enter(cur + 1);
+      }
+
+      function prev() {
+        if (!_app || _app.ui.tutorialStep === 0) return;
+        _app.ui.tutorialStep--;
+        _enter(_app.ui.tutorialStep);
+      }
+
+      function exit() {
+        if (!_app) return;
+        document.querySelectorAll(".tutorial-target").forEach((el) => el.classList.remove("tutorial-target"));
+        _app.ui.tutorialActive = false;
+        if (_keyHandler)    document.removeEventListener("keydown", _keyHandler);
+        if (_resizeHandler) window.removeEventListener("resize", _resizeHandler);
+        _keyHandler = null; _resizeHandler = null;
+        try { localStorage.setItem("regapp-tutorial-seen", "1"); } catch (e) {}
+        _app = null;
+        _activeSteps = null;
+      }
+
+      // Public accessor for the current step (used by the popover template).
+      function currentStep(app) {
+        if (!app.ui.tutorialActive) return null;
+        const list = (app.ui.tutorialBranch === "logistic") ? LOGISTIC_STEPS : STEPS;
+        return list[app.ui.tutorialStep] || null;
+      }
+      function totalSteps(app) {
+        const list = (app.ui.tutorialBranch === "logistic") ? LOGISTIC_STEPS : STEPS;
+        return list.length;
+      }
+      function preconditionMet(app) {
+        const step = currentStep(app);
+        return !step || !step.precondition || step.precondition(app);
+      }
+
+      return { STEPS, LOGISTIC_STEPS, start, next, prev, exit, currentStep, totalSteps, preconditionMet };
     })();
 
     const SelfTest = (function () {
@@ -3928,6 +4200,8 @@
           darkMode: false,
           tutorialActive: false,
           tutorialStep: 0,
+          tutorialBranch: "ols",   // 'ols' | 'logistic'
+          firstRunPrompt: false,
           specDirty: false,
           busy: false,
           pasteText: "",
@@ -3983,6 +4257,14 @@
           this.bootStatus = this.availableSamples.length > 0
             ? "Ready — pick a sample dataset, upload a CSV, or paste data."
             : "Ready — upload a CSV or paste data (sample datasets bundle in Steps 5-6).";
+
+          // First-run: offer the tutorial unless the user has dismissed
+          // it before. localStorage flag set on Tutorial.exit().
+          try {
+            if (!localStorage.getItem("regapp-tutorial-seen")) {
+              this.ui.firstRunPrompt = true;
+            }
+          } catch (e) { /* localStorage not available — skip prompt */ }
 
           // Watch spec/config for changes after a fit so the Refit button lights up.
           this.$watch("spec",   () => { if (this.model) this.ui.specDirty = true; }, { deep: true });
@@ -4344,13 +4626,25 @@
         print()          { try { Report.print(this.model); }    catch (e) { this._reportError(e.message, "print"); } },
 
         /* =========================================================
-           Tutorial — wired to Tutorial namespace (Step 14)
+           Tutorial — dispatcher methods called from the overlay buttons
            ========================================================= */
-        startTutorial() {
-          this.ui.tutorialActive = true;
-          this.ui.tutorialStep = 0;
-          Tutorial.start(this);
+        startTutorial(branch) {
+          this.ui.firstRunPrompt = false;
+          // Auto-pick branch from current model family if not specified.
+          const b = branch || (this.model && this.model.family === "logistic" ? "logistic" : "ols");
+          Tutorial.start(this, b);
         },
+        dismissFirstRun() {
+          this.ui.firstRunPrompt = false;
+          try { localStorage.setItem("regapp-tutorial-seen", "1"); } catch (e) {}
+        },
+        // Convenience getters used by the tutorial popover template.
+        get tutorialStepObj() { return Tutorial.currentStep(this); },
+        get tutorialTotal()   { return Tutorial.totalSteps(this); },
+        get tutorialReady()   { return Tutorial.preconditionMet(this); },
+        tutorialNext() { Tutorial.next(); },
+        tutorialPrev() { Tutorial.prev(); },
+        tutorialExit() { Tutorial.exit(); },
 
         /* =========================================================
            Formatting helpers (used by Summary / Coefficients tabs)
