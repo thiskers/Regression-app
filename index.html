@@ -1941,11 +1941,33 @@
           return isMissing(v) ? (imputed[name] !== undefined ? imputed[name] : NaN) : v;
         };
 
-        // Build y. Response must be numeric for OLS; logistic relaxes this in Step 13.
+        // Build y. Response must be numeric for OLS / polynomial.
+        // For logistic, accept either numeric 0/1 or a 2-level string and
+        // encode strings as 0/1 with the alphabetically-second level as the
+        // positive class. The chosen positive level is reported back via
+        // the design.responseLevels object so the UI can label it.
         if (types[responseName] !== "numeric" && spec.family !== "logistic") {
           throw new Error(`Response "${responseName}" is not numeric — for binary outcomes switch family to logistic.`);
         }
-        const y = validIdx.map((i) => valueAt(i, responseName));
+        let y, responseLevels = null;
+        if (spec.family === "logistic" && types[responseName] === "string") {
+          const raw = validIdx.map((i) => rows[i][responseName]);
+          const unique = Array.from(new Set(raw)).sort();
+          if (unique.length !== 2) {
+            throw new Error(`Logistic response "${responseName}" must have exactly 2 distinct values; found ${unique.length}.`);
+          }
+          const positive = unique[1];
+          y = raw.map((v) => v === positive ? 1 : 0);
+          responseLevels = { positive, negative: unique[0] };
+        } else {
+          y = validIdx.map((i) => valueAt(i, responseName));
+          if (spec.family === "logistic") {
+            // Sanity-check that numeric response is binary 0/1.
+            const ok = y.every((v) => v === 0 || v === 1);
+            if (!ok) throw new Error(`Logistic response "${responseName}" must be 0/1 — got non-binary numeric values.`);
+            responseLevels = { positive: 1, negative: 0 };
+          }
+        }
 
         // Build X column-by-column with encoding / transforms.
         const xCols = [];
@@ -2006,6 +2028,7 @@
           X, y,
           names: xCols.map((c) => c.name),
           response: responseName,
+          responseLevels,
           dropped: dropped.length,
           warnings,
         };
@@ -2116,11 +2139,247 @@
         };
       }
 
+      /* ---- ROC / AUC ----
+             Sweep all unique probability thresholds; for each, count
+             TPR / FPR. AUC via the trapezoidal rule.                  */
+      function _rocPoints(probs, y) {
+        const order = probs.map((_, i) => i).sort((a, b) => probs[b] - probs[a]);
+        const totalPos = y.reduce((s, v) => s + v, 0);
+        const totalNeg = y.length - totalPos;
+        if (totalPos === 0 || totalNeg === 0) return [{ tpr: 0, fpr: 0, threshold: 1 }, { tpr: 1, fpr: 1, threshold: 0 }];
+        const points = [{ tpr: 0, fpr: 0, threshold: 1 + 1e-9 }];
+        let tp = 0, fp = 0;
+        let prevP = null;
+        for (const i of order) {
+          const p = probs[i];
+          if (prevP !== null && p !== prevP) {
+            points.push({ tpr: tp / totalPos, fpr: fp / totalNeg, threshold: prevP });
+          }
+          if (y[i] === 1) tp++;
+          else            fp++;
+          prevP = p;
+        }
+        points.push({ tpr: tp / totalPos, fpr: fp / totalNeg, threshold: prevP });
+        return points;
+      }
+      function _auc(rocPoints) {
+        let a = 0;
+        for (let i = 1; i < rocPoints.length; i++) {
+          const dx = rocPoints[i].fpr - rocPoints[i - 1].fpr;
+          const ay = (rocPoints[i].tpr + rocPoints[i - 1].tpr) / 2;
+          a += dx * ay;
+        }
+        return a;
+      }
+
+      /* ---- Calibration deciles for logistic predictions.
+             Bin predictions into N quantiles and compare bin-mean
+             predicted probability with bin-observed positive rate.  */
+      function _calibrationBins(probs, y, nBins = 10) {
+        const order = probs.map((_, i) => i).sort((a, b) => probs[a] - probs[b]);
+        const n = probs.length;
+        const perBin = Math.max(1, Math.floor(n / nBins));
+        const bins = [];
+        for (let b = 0; b < nBins; b++) {
+          const lo = b * perBin;
+          const hi = b === nBins - 1 ? n : Math.min(n, (b + 1) * perBin);
+          if (lo >= hi) continue;
+          let sumP = 0, sumY = 0, count = 0;
+          for (let k = lo; k < hi; k++) {
+            const i = order[k];
+            sumP += probs[i]; sumY += y[i]; count++;
+          }
+          bins.push({ meanPredicted: sumP / count, observedRate: sumY / count, count });
+        }
+        return bins;
+      }
+
+      /* ---- fitLogistic(X, y, opts) — IRLS / Newton-Raphson.
+             Each iteration solves (X' W X) Δβ = X' (y − p),
+             where p = σ(Xβ) and W = diag(p(1−p)). Standard logistic
+             MLE; converges quadratically for well-separated classes.
+             We detect non-convergence and explosive |β| (separation)
+             and report rather than producing bogus inference.        */
+      function fitLogistic(X, y, opts) {
+        if (typeof window.mlMatrix === "undefined") throw new Error("ml-matrix CDN not loaded.");
+        const M   = window.mlMatrix.Matrix;
+        const inv = window.mlMatrix.inverse;
+
+        const n = X.length, p = X[0].length;
+        if (n <= p) throw new Error(`Cannot fit logistic: n (${n}) ≤ p (${p}).`);
+
+        const maxIter = opts.maxIter || 50;
+        const tol     = opts.tol     || 1e-8;
+
+        let beta = new Array(p).fill(0);
+        let iter = 0, converged = false, separationFlag = false;
+        let lastLogLik = -Infinity;
+
+        // Helper: σ(η) safe
+        const sigmoid = (eta) => 1 / (1 + Math.exp(-Math.max(-500, Math.min(500, eta))));
+        const linPred = (b) => X.map((row) => row.reduce((s, x, j) => s + x * b[j], 0));
+
+        for (iter = 0; iter < maxIter; iter++) {
+          const eta = linPred(beta);
+          const probs = eta.map(sigmoid);
+
+          // Build XtWX (p×p) and Xtres (p)
+          const XtWX = new Array(p * p).fill(0);
+          const Xtres = new Array(p).fill(0);
+          for (let i = 0; i < n; i++) {
+            const w_i = probs[i] * (1 - probs[i]);
+            const r_i = y[i] - probs[i];
+            const row = X[i];
+            for (let j = 0; j < p; j++) {
+              Xtres[j] += row[j] * r_i;
+              const xj_w = row[j] * w_i;
+              for (let k = 0; k < p; k++) XtWX[j * p + k] += xj_w * row[k];
+            }
+          }
+          // Solve via inverse (small p; clean enough). Catch singular case.
+          let XtWXinv;
+          try {
+            const Xm = new M(p, p);
+            for (let j = 0; j < p; j++) for (let k = 0; k < p; k++) Xm.set(j, k, XtWX[j * p + k]);
+            XtWXinv = inv(Xm);
+          } catch (e) {
+            separationFlag = true; break;
+          }
+          const delta = new Array(p).fill(0);
+          for (let j = 0; j < p; j++)
+            for (let k = 0; k < p; k++) delta[j] += XtWXinv.get(j, k) * Xtres[k];
+
+          // Update β
+          for (let j = 0; j < p; j++) beta[j] += delta[j];
+
+          // Check convergence on log-likelihood.
+          let logLik = 0;
+          for (let i = 0; i < n; i++) {
+            const piHat = sigmoid(X[i].reduce((s, x, j) => s + x * beta[j], 0));
+            const pSafe = Math.min(1 - 1e-15, Math.max(1e-15, piHat));
+            logLik += y[i] * Math.log(pSafe) + (1 - y[i]) * Math.log(1 - pSafe);
+          }
+          if (Math.abs(logLik - lastLogLik) < tol) { converged = true; break; }
+          lastLogLik = logLik;
+
+          // Separation check: any |β| above 30 with non-convergence is the
+          // canonical Hauck-Donner sign. If |β| explodes, bail.
+          if (beta.some((b) => Math.abs(b) > 50)) { separationFlag = true; break; }
+        }
+
+        // Final inference at converged β.
+        const eta   = linPred(beta);
+        const probs = eta.map(sigmoid);
+        const w     = probs.map((p) => p * (1 - p));
+
+        // Wald SE via final (X'WX)⁻¹.
+        const Xt   = new Array(p * p).fill(0);
+        for (let i = 0; i < n; i++) {
+          const row = X[i];
+          for (let j = 0; j < p; j++) {
+            const xj_w = row[j] * w[i];
+            for (let k = 0; k < p; k++) Xt[j * p + k] += xj_w * row[k];
+          }
+        }
+        const Xm = new M(p, p);
+        for (let j = 0; j < p; j++) for (let k = 0; k < p; k++) Xm.set(j, k, Xt[j * p + k]);
+        let seBeta;
+        try {
+          const Xmi = inv(Xm);
+          seBeta = [];
+          for (let j = 0; j < p; j++) seBeta.push(Math.sqrt(Math.max(0, Xmi.get(j, j))));
+        } catch (e) {
+          separationFlag = true;
+          seBeta = new Array(p).fill(NaN);
+        }
+        const z      = beta.map((b, j) => b / seBeta[j]);
+        const pVals  = z.map((zi) => 2 * (1 - NumLib.normCDF(Math.abs(zi))));
+        const z975   = NumLib.normInv(0.975);
+        const ci     = beta.map((b, j) => [b - z975 * seBeta[j], b + z975 * seBeta[j]]);
+
+        // Deviance, null deviance, McFadden pseudo-R², LR chi².
+        const deviance = -2 * y.reduce((s, yi, i) => {
+          const pSafe = Math.min(1 - 1e-15, Math.max(1e-15, probs[i]));
+          return s + (yi * Math.log(pSafe) + (1 - yi) * Math.log(1 - pSafe));
+        }, 0);
+        const yMean = NumLib.mean(y);
+        const yMs   = Math.min(1 - 1e-15, Math.max(1e-15, yMean));
+        const nullDeviance = -2 * y.reduce((s, yi) =>
+          s + (yi * Math.log(yMs) + (1 - yi) * Math.log(1 - yMs)), 0);
+        const mcFaddenR2 = nullDeviance > 0 ? 1 - deviance / nullDeviance : NaN;
+        const lrChi2     = nullDeviance - deviance;
+        const hasIntercept = opts.intercept !== false;
+        const lrDf       = hasIntercept ? p - 1 : p;
+        const lrPval     = lrDf > 0 ? 1 - NumLib.chi2CDF(lrChi2, lrDf) : NaN;
+        const logLikFinal = -deviance / 2;
+        const aic = -2 * logLikFinal + 2 * p;
+        const bic = -2 * logLikFinal + Math.log(n) * p;
+
+        // ROC + AUC
+        const rocPoints = _rocPoints(probs, y);
+        const auc = _auc(rocPoints);
+
+        // Confusion matrix at threshold.
+        const threshold = (opts.logisticThreshold != null) ? opts.logisticThreshold : 0.5;
+        let tp = 0, fp = 0, tn = 0, fn = 0;
+        for (let i = 0; i < n; i++) {
+          const yhat = probs[i] >= threshold ? 1 : 0;
+          if (yhat === 1 && y[i] === 1) tp++;
+          else if (yhat === 1)          fp++;
+          else if (y[i] === 0)          tn++;
+          else                          fn++;
+        }
+        const accuracy = (tp + tn) / n;
+
+        const calibration = _calibrationBins(probs, y, 10);
+
+        const warnings = (opts.warnings || []).slice();
+        if (!converged) warnings.push(`Logistic IRLS did not converge in ${maxIter} iterations.`);
+        if (separationFlag) warnings.push("Separation (or near-separation) detected — coefficients diverged. Consider penalised logistic (Firth / ridge) or dropping the offending predictor.");
+
+        return {
+          family: "logistic",
+          fittedAt: new Date().toISOString(),
+          spec: {
+            response: opts.response,
+            predictorNames: opts.names,
+            hasIntercept,
+            n, p,
+            responseLevels: opts.responseLevels || null,
+          },
+          beta, se: seBeta, t: z, p: pVals, ci,
+          betaStd: new Array(p).fill(null),
+          fitted: probs, residuals: y.map((yi, i) => yi - probs[i]),
+          // Logistic-specific
+          deviance, nullDeviance, mcFaddenR2,
+          lrChi2, lrDf, lrPval,
+          converged, iterations: iter, separation: separationFlag,
+          confusion: { tp, fp, tn, fn, accuracy },
+          threshold,
+          rocPoints, auc,
+          calibration,
+          // Reused-shape fields so OLS-shaped UI panels render politely:
+          //   r2 → pseudo-R² (McFadden)
+          //   fStat / fPval → likelihood-ratio χ² and its p-value
+          //   logLik / aic / bic — same meaning
+          //   rmse / sigma2 / tss / mss / rss → null/NaN (not applicable)
+          rss: NaN, tss: NaN, mss: NaN, sigma2: NaN, rmse: NaN,
+          r2: mcFaddenR2, adjR2: NaN,
+          fStat: lrChi2, fDf1: lrDf, fDf2: NaN, fPval: lrPval,
+          logLik: logLikFinal, aic, bic,
+          dropped: opts.dropped || 0,
+          warnings,
+          diagnostics: {},
+          interp: null,
+          X, y,
+        };
+      }
+
       return {
         buildDesign,
         fitOLS,
-        fitLogistic: _NI("Stats.fitLogistic", 13),
-        _internal: { tInverse },
+        fitLogistic,
+        _internal: { tInverse, _rocPoints, _auc, _calibrationBins },
       };
     })();
 
@@ -2379,6 +2638,32 @@
       /* ---- Top-level orchestrator ---- */
       function compute(model) {
         if (!model || !model.X) return;
+        // Logistic short-circuit: most OLS tests (DW, BP, JB, SW, hat-matrix
+        // leverage) don't carry the usual interpretation under IRLS. We
+        // surface VIF (predictor collinearity is family-agnostic) and
+        // pass through the logistic-specific bits already on the model so
+        // the Diagnostics tab renders cleanly.
+        if (model.family === "logistic") {
+          const vif = vifs(model.X, model.spec.predictorNames, model.spec.hasIntercept);
+          model.diagnostics = {
+            vif,
+            converged: model.converged,
+            iterations: model.iterations,
+            separation: model.separation,
+            auc: model.auc,
+            confusion: model.confusion,
+            // OLS-shaped placeholders so existing panels don't crash:
+            leverage: [], studResid: [], cooks: [], influentialIdx: [],
+            durbinWatson: NaN,
+            bp: { stat: NaN, p: NaN, df: 0 },
+            jb: { stat: NaN, p: NaN, skewness: NaN, kurtosis: NaN },
+            sw: { stat: NaN, p: NaN, n: model.spec.n },
+            cookThreshold:     4 / model.spec.n,
+            leverageThreshold: 2 * model.spec.p / model.spec.n,
+            hc3: null,
+          };
+          return;
+        }
         const { lev, XtXinv } = leverages(model.X);
         const stud   = studentized(model.residuals, model.rmse, lev);
         const cooks  = cooksDistance(stud, lev, model.spec.p);
@@ -2918,6 +3203,62 @@
         window.Plotly.newPlot(el, traces, layout, _config);
       }
 
+      /* ---- Figure 12: ROC curve with AUC. Logistic-only.
+             Step in the curve at every unique predicted probability;
+             diagonal is the random-classifier reference. */
+      function roc(model, el) {
+        if (model.family !== "logistic" || !model.rocPoints) {
+          _placeholder(el, "ROC curve is shown for logistic models only.");
+          return;
+        }
+        const fpr = model.rocPoints.map((p) => p.fpr);
+        const tpr = model.rocPoints.map((p) => p.tpr);
+        const traces = [
+          { x: [0, 1], y: [0, 1], mode: "lines", name: "random",
+            line: { color: C.ref, dash: "dash", width: 1.5 }, hoverinfo: "skip" },
+          { x: fpr, y: tpr, mode: "lines+markers",
+            name: `ROC (AUC = ${model.auc.toFixed(3)})`,
+            line: { color: C.point, width: 2 },
+            marker: { size: 4, color: C.point },
+            customdata: model.rocPoints.map((p) => p.threshold),
+            hovertemplate: "FPR=%{x:.3f}<br>TPR=%{y:.3f}<br>threshold=%{customdata:.3f}<extra></extra>" },
+        ];
+        const layout = Object.assign(_theme(), {
+          title: { text: `ROC curve  (AUC = ${model.auc.toFixed(3)})`, font: { size: 14 } },
+          xaxis: Object.assign({}, _theme().xaxis, { title: { text: "False positive rate (1 − specificity)" }, range: [0, 1] }),
+          yaxis: Object.assign({}, _theme().yaxis, { title: { text: "True positive rate (sensitivity)" }, range: [0, 1] }),
+        });
+        window.Plotly.newPlot(el, traces, layout, _config);
+      }
+
+      /* ---- Figure 13: calibration plot. Logistic-only.
+             Decile-binned predicted probability vs observed positive
+             rate; close to y=x means well-calibrated.                */
+      function calibration(model, el) {
+        if (model.family !== "logistic" || !model.calibration) {
+          _placeholder(el, "Calibration plot is shown for logistic models only.");
+          return;
+        }
+        const xs = model.calibration.map((b) => b.meanPredicted);
+        const ys = model.calibration.map((b) => b.observedRate);
+        const counts = model.calibration.map((b) => b.count);
+        const traces = [
+          { x: [0, 1], y: [0, 1], mode: "lines", name: "perfect",
+            line: { color: C.ref, dash: "dash", width: 1.5 }, hoverinfo: "skip" },
+          { x: xs, y: ys, mode: "lines+markers", name: "observed",
+            line: { color: C.point, width: 2 },
+            marker: { size: 8, color: C.point, line: { color: "white", width: 1 } },
+            text: counts.map((c) => `n = ${c}`),
+            hovertemplate: "predicted=%{x:.3f}<br>observed=%{y:.3f}<br>%{text}<extra></extra>" },
+        ];
+        const layout = Object.assign(_theme(), {
+          title: { text: "Calibration (predicted vs observed by decile)", font: { size: 14 } },
+          xaxis: Object.assign({}, _theme().xaxis, { title: { text: "Mean predicted probability" }, range: [0, 1] }),
+          yaxis: Object.assign({}, _theme().yaxis, { title: { text: "Observed positive rate" }, range: [0, 1] }),
+        });
+        window.Plotly.newPlot(el, traces, layout, _config);
+      }
+
       /* ---- renderAll(model) — orchestrator.
              Walks the known plot div ids and dispatches. Plots whose
              div doesn't exist (yet — e.g. Step 11 plots) are skipped.
@@ -2938,6 +3279,8 @@
           ["plot-predictedActual",   predictedActual],
           ["plot-coefForest",        coefForest],
           ["plot-influenceIndex",    influenceIndex],
+          ["plot-roc",               roc],
+          ["plot-calibration",       calibration],
         ];
         for (const [id, fn] of dispatch) {
           const el = get(id);
@@ -2951,9 +3294,7 @@
         scatterFit, residFitted, qqNormal, scaleLocation,
         residLeverage, residHistogram, corrHeatmap, partialRegression,
         predictedActual, coefForest, influenceIndex,
-        // Step 13 ships ROC + calibration for logistic.
-        roc:               _NI("Plots.roc",               13),
-        calibration:       _NI("Plots.calibration",       13),
+        roc, calibration,
       };
     })();
 
@@ -3620,6 +3961,8 @@
               response:  this.spec.response,
               dropped:   design.dropped,
               warnings:  design.warnings,
+              responseLevels: design.responseLevels,
+              logisticThreshold: this.config.logisticThreshold,
             });
             // Carry the robust-SE preference onto the model so Diag.compute
             // knows to materialise the HC3 bundle (used by Coefficients
