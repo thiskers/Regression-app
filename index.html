@@ -1306,22 +1306,70 @@
       <!-- Tab: About -->
       <div class="tab-panel" x-show="ui.activeTab === 'about'">
         <article class="panel">
-          <h2 class="panel-title">About this app</h2>
-          <p>
-            <strong>Regression-app</strong> is a single-file browser tool for statistical
-            regression analysis. Load a sample or your own CSV, fit OLS / polynomial /
-            logistic models, inspect a full diagnostic suite, and read a plain-English
-            interpretation of what the model says.
+          <h2 class="panel-title">About Regression-app</h2>
+          <p style="margin: 0 0 0.75rem 0">
+            A single-file browser tool for statistical regression analysis. Load a
+            sample or your own CSV, fit OLS / polynomial / logistic models, inspect
+            a full diagnostic suite, and read a plain-English interpretation of what
+            the model says. No backend, no build step.
           </p>
-          <p>
-            Numerical accuracy is validated against the
+
+          <p style="margin: 0">
+            <button class="secondary" @click="startTutorial()" style="margin: 0; padding: 0.4rem 0.9rem">
+              Run the in-app tutorial
+            </button>
+            <a href="#selftest" @click.prevent="setTab('selftest'); runSelfTest()"
+               style="margin-left: 0.5rem">Run NIST self-tests</a>
+          </p>
+        </article>
+
+        <article class="panel">
+          <h3 style="margin: 0 0 0.5rem 0; font-size: 0.95rem">Features</h3>
+          <ul style="margin: 0; padding-left: 1.25rem; font-size: 0.9rem; line-height: 1.6">
+            <li>8 bundled sample datasets (Anscombe, mtcars, Longley NIST, King County housing, NYC airquality, R cars, iris-binary, Pima)</li>
+            <li>OLS via QR; logistic via IRLS; polynomial expansion (degree 2–6)</li>
+            <li>Full classical inference (β, SE, t/z, p, 95 % CI, std β, VIF) with HC3 robust SEs available</li>
+            <li>Assumption tests: Durbin-Watson, Breusch-Pagan (Koenker), Jarque-Bera, Shapiro-Wilk (Royston 1992); leverage, Cook's distance, influential-rows table</li>
+            <li>13 Plotly diagnostic figures, dark-theme aware</li>
+            <li>Plain-English interpretation engine — 15 rules across Overall fit / Predictor effects / Assumption issues / Recommendations + headline</li>
+            <li>Predictions tab — single-row form with ŷ + 95 % CI / PI (OLS) or p̂ + class (logistic)</li>
+            <li>Export: JSON state dump, Markdown report, PDF via OS print dialog</li>
+            <li>Guided spotlight tutorial (11-step OLS + 4-step logistic branch)</li>
+          </ul>
+        </article>
+
+        <article class="panel">
+          <h3 style="margin: 0 0 0.5rem 0; font-size: 0.95rem">Numerical accuracy</h3>
+          <p style="margin: 0 0 0.5rem 0; font-size: 0.9rem">
+            Validated against the
             <a href="https://www.itl.nist.gov/div898/strd/" target="_blank" rel="noopener">NIST StRD</a>
-            reference datasets. Open <a href="#selftest" @click.prevent="ui.activeTab = 'about'">Run self-tests</a>
-            (footer) once Step 15 has landed.
+            reference datasets and R <code>lm()</code> canonical values. Coefficient
+            estimates match Longley (cond ≈ 5×10⁹) to 1e-6 relative — a stress test
+            naive normal-equations solvers fail. Solver: QR decomposition via
+            ml-matrix.
           </p>
-          <p style="font-size: 0.8rem; color: var(--pico-muted-color)">
-            Build status: <code x-text="bootStatus"></code><br>
-            Libraries: <code x-text="libsDetected"></code>
+          <p style="margin: 0; font-size: 0.85rem">
+            <a href="#selftest" @click.prevent="setTab('selftest'); runSelfTest()">Run the 52-test self-test page →</a>
+          </p>
+        </article>
+
+        <article class="panel">
+          <h3 style="margin: 0 0 0.5rem 0; font-size: 0.95rem">Stack</h3>
+          <table class="coef-table" style="font-family: var(--pico-font-family); font-size: 0.82rem">
+            <thead>
+              <tr><th class="name">Library</th><th class="name">Used for</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="name">Pico CSS 2</td>            <td class="name">semantic styling</td></tr>
+              <tr><td class="name">ml-matrix 6.10.7</td>      <td class="name">QR decomposition + matrix ops</td></tr>
+              <tr><td class="name">Plotly.js 2.35.2</td>      <td class="name">13 diagnostic plots</td></tr>
+              <tr><td class="name">Papa Parse 5.4.1</td>      <td class="name">CSV ingestion</td></tr>
+              <tr><td class="name">Alpine.js 3.14.1</td>      <td class="name">reactive UI binding</td></tr>
+            </tbody>
+          </table>
+          <p style="margin-top: 0.5rem; font-size: 0.78rem; color: var(--pico-muted-color)">
+            Boot status: <code x-text="bootStatus"></code><br>
+            Libraries (this session): <code x-text="libsDetected"></code>
           </p>
         </article>
       </div>
