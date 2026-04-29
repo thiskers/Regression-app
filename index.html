@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Browser-based statistical regression workbench. Load samples or your own CSV; run OLS, polynomial, or logistic regression with full diagnostics and a plain-English interpretation.">
+  <title>Regression-app — Statistical Regression Workbench</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+</head>
+<body>
+  <main class="container" x-data="app()" x-init="init()">
+    <header>
+      <hgroup>
+        <h1>Regression-app</h1>
+        <p>Statistical regression workbench — load a sample dataset or upload your own CSV. Full inference, diagnostics, and plain-English interpretation. <em>(UI scaffolding will land in subsequent steps.)</em></p>
+      </hgroup>
+    </header>
+
+    <article>
+      <p>Boot status: <strong x-text="bootStatus"></strong></p>
+      <p>External libraries detected: <code x-text="libsDetected"></code></p>
+    </article>
+  </main>
+
+  <!--
+    External libraries.
+    Order matters: data/math libs first, then plotting, then app code, then Alpine last.
+    Pinned to specific versions so this file is reproducible offline once cached.
+  -->
+  <script src="https://cdn.jsdelivr.net/npm/ml-matrix@6.10.7/matrix.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/ml-regression-multivariate-linear@2.0.4/lib/index.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+
+  <!--
+    App code. Grows over Steps 2–15: theme tokens, full HTML body content, Alpine state,
+    sample datasets, NumLib, Stats, Diag, Plots, Interpret, Logistic, Tutorial, Report, SelfTest.
+    For Step 1 this is just a stub so Alpine has something to bind to.
+  -->
+  <script>
+    function app() {
+      return {
+        bootStatus: "initialising…",
+        libsDetected: "(checked on init)",
+        init() {
+          const have = (name, ref) => `${name}=${ref ? "ok" : "MISSING"}`;
+          this.libsDetected = [
+            have("ml-matrix", typeof window.mlMatrix !== "undefined" || typeof window.MLMatrix !== "undefined"),
+            have("Papa", typeof window.Papa !== "undefined"),
+            have("Plotly", typeof window.Plotly !== "undefined"),
+            have("Alpine", typeof window.Alpine !== "undefined"),
+          ].join(" ");
+          this.bootStatus = "Step 1 skeleton loaded — ready for Step 2.";
+        },
+      };
+    }
+  </script>
+
+  <!-- Alpine.js loaded after app() is defined so x-data finds the factory at scan time. -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+</body>
+</html>
