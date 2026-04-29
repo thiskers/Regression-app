@@ -600,22 +600,131 @@
 
       <!-- Tab: Summary -->
       <div class="tab-panel" x-show="ui.activeTab === 'summary'">
-        <article class="panel">
+        <article class="panel" x-show="!model">
           <h2 class="panel-title">Summary</h2>
-          <p x-show="!model" style="color: var(--pico-muted-color)">
+          <p style="color: var(--pico-muted-color)">
             No model fit yet. Load a sample, pick a response and predictors, then click <strong>Fit</strong>.
           </p>
-          <div x-show="model" style="font-style: italic; color: var(--pico-muted-color)">
-            (Headline numbers and one-paragraph auto-summary land in Step 8.)
+        </article>
+
+        <article class="panel" x-show="model">
+          <h2 class="panel-title">Model</h2>
+          <p style="margin: 0.25rem 0 0.75rem 0; font-size: 0.95rem">
+            <code x-text="model && model.spec.response"></code>
+            <span> ~ </span>
+            <code x-text="model && model.spec.predictorNames.filter(n => n !== '(Intercept)').join(' + ') || ''"></code>
+            <span x-show="model && !model.spec.hasIntercept" style="color: var(--pico-muted-color)"> (no intercept)</span>
+            <span style="color: var(--pico-muted-color); margin-left: 0.5rem">
+              · n=<span x-text="model && model.spec.n"></span>
+              · <span x-text="model && model.family.toUpperCase()"></span>
+              <span x-show="model && model.dropped > 0">
+                · <span x-text="model && model.dropped"></span> rows dropped
+              </span>
+            </span>
+          </p>
+
+          <div class="stat-grid">
+            <div class="stat" title="Coefficient of determination — fraction of variance explained.">
+              <span class="stat-label">R²</span>
+              <span class="stat-value" x-text="model && fmt(model.r2, 4)"></span>
+            </div>
+            <div class="stat" title="Adjusted R² — penalised for number of predictors.">
+              <span class="stat-label">Adj R²</span>
+              <span class="stat-value" x-text="model && fmt(model.adjR2, 4)"></span>
+            </div>
+            <div class="stat" title="Root mean squared error of residuals.">
+              <span class="stat-label">RMSE</span>
+              <span class="stat-value" x-text="model && fmt(model.rmse, 4)"></span>
+            </div>
+            <div class="stat" title="Overall F-test of the model vs. an intercept-only model.">
+              <span class="stat-label">F</span>
+              <span class="stat-value" x-text="model ? (Number.isFinite(model.fStat) ? fmt(model.fStat, 2) + ' (' + model.fDf1 + ',' + model.fDf2 + ')' : '—') : ''"></span>
+            </div>
+            <div class="stat" title="p-value of the overall F-test.">
+              <span class="stat-label">F p-value</span>
+              <span class="stat-value" x-text="model ? (Number.isFinite(model.fPval) ? fmtP(model.fPval) : '—') : ''"></span>
+            </div>
+            <div class="stat" title="Akaike / Bayesian information criteria — lower is better.">
+              <span class="stat-label">AIC / BIC</span>
+              <span class="stat-value" x-text="model && (fmt(model.aic, 1) + ' / ' + fmt(model.bic, 1))"></span>
+            </div>
+            <div class="stat" title="Log-likelihood at the MLE.">
+              <span class="stat-label">log L</span>
+              <span class="stat-value" x-text="model && fmt(model.logLik, 2)"></span>
+            </div>
+            <div class="stat" title="Residual degrees of freedom (n − p).">
+              <span class="stat-label">df</span>
+              <span class="stat-value" x-text="model && (model.spec.n - model.spec.p)"></span>
+            </div>
           </div>
+        </article>
+
+        <article class="panel" x-show="model && model.warnings && model.warnings.length > 0">
+          <h2 class="panel-title">Warnings</h2>
+          <template x-for="w in (model && model.warnings) || []" :key="w">
+            <div style="margin-bottom: 0.4rem"><span class="pill warn"><span class="dot"></span><span x-text="w"></span></span></div>
+          </template>
+        </article>
+
+        <article class="panel" x-show="model">
+          <h2 class="panel-title">One-paragraph headline</h2>
+          <p style="margin: 0; font-size: 0.92rem; line-height: 1.5" x-html="model && oneLineSummary(model)"></p>
+          <p style="margin-top: 0.5rem; font-size: 0.78rem; color: var(--pico-muted-color)">
+            Plain-English interpretation with rule-based recommendations arrives in Step 12 — see the Interpretation tab.
+          </p>
         </article>
       </div>
 
       <!-- Tab: Coefficients -->
       <div class="tab-panel" x-show="ui.activeTab === 'coefficients'">
-        <article class="panel">
+        <article class="panel" x-show="!model">
           <h2 class="panel-title">Coefficients</h2>
-          <p style="color: var(--pico-muted-color)">Coefficient table arrives in Step 8 (estimate, SE, t/z, p, 95 % CI, standardised β, VIF).</p>
+          <p style="color: var(--pico-muted-color)">Fit a model first.</p>
+        </article>
+
+        <article class="panel" x-show="model">
+          <h2 class="panel-title">Coefficients</h2>
+          <div style="overflow-x: auto">
+            <table class="coef-table">
+              <thead>
+                <tr>
+                  <th class="name">Predictor</th>
+                  <th title="Point estimate of the coefficient.">Estimate</th>
+                  <th title="Standard error of the estimate.">Std. err</th>
+                  <th title="Test statistic (t for OLS, z for logistic).">
+                    <span x-text="model && model.family === 'logistic' ? 'z' : 't'"></span>
+                  </th>
+                  <th title="Two-sided p-value.">p-value</th>
+                  <th title="95 % confidence interval.">95 % CI</th>
+                  <th title="Standardised β — comparable across predictors.">Std β</th>
+                  <th title="Variance Inflation Factor — &gt; 5 hints at multicollinearity (filled in Step 9).">VIF</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="(name, i) in (model && model.spec.predictorNames) || []" :key="i">
+                  <tr :class="{ sig: model && model.p && model.p[i] < 0.05 }">
+                    <td class="name" x-text="name"></td>
+                    <td x-text="model && fmt(model.beta[i], 5)"></td>
+                    <td x-text="model && fmt(model.se[i], 5)"></td>
+                    <td x-text="model && fmt(model.t[i], 3)"></td>
+                    <td>
+                      <span x-text="model && fmtP(model.p[i])"></span>
+                      <span class="stars" x-text="model && sigStars(model.p[i])"></span>
+                    </td>
+                    <td x-text="model && ('[' + fmt(model.ci[i][0], 4) + ', ' + fmt(model.ci[i][1], 4) + ']')"></td>
+                    <td x-text="model && (model.betaStd[i] === null ? '—' : fmt(model.betaStd[i], 3))"></td>
+                    <td x-text="model && (model.diagnostics && model.diagnostics.vif && model.diagnostics.vif[i] !== undefined ? fmt(model.diagnostics.vif[i], 2) : '—')"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <p style="font-size: 0.72rem; color: var(--pico-muted-color); margin-top: 0.75rem">
+            Significance: <span class="stars">***</span> p&lt;0.001  ·
+            <span class="stars">**</span> p&lt;0.01  ·
+            <span class="stars">*</span> p&lt;0.05  ·
+            <span class="stars">·</span> p&lt;0.10
+          </p>
         </article>
       </div>
 
@@ -2080,6 +2189,53 @@
           this.ui.tutorialActive = true;
           this.ui.tutorialStep = 0;
           Tutorial.start(this);
+        },
+
+        /* =========================================================
+           Formatting helpers (used by Summary / Coefficients tabs)
+           ========================================================= */
+        // General-purpose number formatter: scientific for very large /
+        // very small magnitudes, fixed-decimal otherwise.
+        fmt(x, digits = 4) {
+          if (x === null || x === undefined || Number.isNaN(x)) return "—";
+          if (!Number.isFinite(x)) return x > 0 ? "∞" : "−∞";
+          const ax = Math.abs(x);
+          if (ax !== 0 && (ax < 1e-3 || ax >= 1e6)) return x.toExponential(digits - 1);
+          return x.toFixed(digits);
+        },
+        // p-values get special treatment: report < 0.001 / < 0.0001 etc.
+        fmtP(p) {
+          if (p === null || p === undefined || Number.isNaN(p)) return "—";
+          if (p < 1e-4) return "< 1e-4";
+          if (p < 1e-3) return "< 0.001";
+          return p.toFixed(4);
+        },
+        sigStars(p) {
+          if (p === null || p === undefined || Number.isNaN(p)) return "";
+          if (p < 0.001) return "***";
+          if (p < 0.01)  return "**";
+          if (p < 0.05)  return "*";
+          if (p < 0.10)  return "·";
+          return "";
+        },
+        // One-paragraph headline summary — a stop-gap until Step 12's full
+        // rules engine ships. Reports overall fit + a one-line F-test verdict.
+        oneLineSummary(m) {
+          if (!m) return "";
+          const r2 = (m.r2 * 100).toFixed(1);
+          const adj = (m.adjR2 * 100).toFixed(1);
+          const fp = m.fPval;
+          const fitVerdict = !Number.isFinite(fp)
+            ? ""
+            : fp < 0.05
+              ? `The overall F-test is <strong>significant</strong> (F = ${m.fStat.toFixed(2)} on ${m.fDf1} and ${m.fDf2} df, p = ${this.fmtP(fp)}) — there is evidence the model explains <code>${m.spec.response}</code> better than the mean alone.`
+              : `The overall F-test is <em>not</em> significant (F = ${m.fStat.toFixed(2)}, p = ${this.fmtP(fp)}) — the model does not explain <code>${m.spec.response}</code> better than the mean alone, so individual coefficient p-values should not be acted on.`;
+          const sigCount = m.p ? m.p.filter((p, i) => p < 0.05 && (m.spec.hasIntercept ? i > 0 : true)).length : 0;
+          const totalSlopes = (m.spec.predictorNames.length - (m.spec.hasIntercept ? 1 : 0));
+          const sigPart = totalSlopes > 0
+            ? ` Of ${totalSlopes} predictor${totalSlopes === 1 ? "" : "s"}, <strong>${sigCount}</strong> ${sigCount === 1 ? "is" : "are"} significant at α = 0.05.`
+            : "";
+          return `The model explains <strong>${r2}%</strong> of the variance in <code>${m.spec.response}</code> (adjusted R² = ${adj}%). ${fitVerdict}${sigPart}`;
         },
 
         /* =========================================================
