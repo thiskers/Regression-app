@@ -683,7 +683,13 @@
         </article>
 
         <article class="panel" x-show="model">
-          <h2 class="panel-title">Coefficients</h2>
+          <h2 class="panel-title" style="display: flex; align-items: center; gap: 0.5rem">
+            Coefficients
+            <span x-show="model && model.activeSEKind === 'HC3'"
+                  class="pill info" style="font-size: 0.65rem; text-transform: none; letter-spacing: 0">
+              <span class="dot"></span>HC3 robust SE
+            </span>
+          </h2>
           <div style="overflow-x: auto">
             <table class="coef-table">
               <thead>
@@ -730,9 +736,145 @@
 
       <!-- Tab: Diagnostics -->
       <div class="tab-panel" x-show="ui.activeTab === 'diagnostics'">
-        <article class="panel">
+        <article class="panel" x-show="!model">
           <h2 class="panel-title">Diagnostics</h2>
-          <p style="color: var(--pico-muted-color)">Durbin-Watson, Breusch-Pagan, Jarque-Bera, Shapiro-Wilk, leverage, Cook's distance — Step 9.</p>
+          <p style="color: var(--pico-muted-color)">Fit a model first.</p>
+        </article>
+
+        <!-- Assumption-check table -->
+        <article class="panel" x-show="model">
+          <h2 class="panel-title">Assumption checks</h2>
+          <table class="coef-table" style="font-family: var(--pico-font-family)">
+            <thead>
+              <tr>
+                <th class="name">Test</th>
+                <th class="name">Tests for</th>
+                <th>Statistic</th>
+                <th>p-value</th>
+                <th class="name">Verdict</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- Durbin-Watson -->
+              <tr x-show="model && model.diagnostics">
+                <td class="name">Durbin-Watson</td>
+                <td class="name">Residual independence (autocorrelation)</td>
+                <td x-text="model && fmt(model.diagnostics.durbinWatson, 4)"></td>
+                <td>—</td>
+                <td>
+                  <span class="pill" :class="dwVerdict(model && model.diagnostics.durbinWatson).cls"
+                        x-text="dwVerdict(model && model.diagnostics.durbinWatson).text"></span>
+                </td>
+              </tr>
+              <!-- Breusch-Pagan -->
+              <tr x-show="model && model.diagnostics">
+                <td class="name">Breusch-Pagan (Koenker)</td>
+                <td class="name">Homoscedasticity</td>
+                <td x-text="model && fmt(model.diagnostics.bp.stat, 3) + '  (df ' + model.diagnostics.bp.df + ')'"></td>
+                <td x-text="model && fmtP(model.diagnostics.bp.p)"></td>
+                <td>
+                  <span class="pill" :class="pTestVerdict(model && model.diagnostics.bp.p, 'homoscedasticity').cls"
+                        x-text="pTestVerdict(model && model.diagnostics.bp.p, 'homoscedasticity').text"></span>
+                </td>
+              </tr>
+              <!-- Jarque-Bera -->
+              <tr x-show="model && model.diagnostics">
+                <td class="name">Jarque-Bera</td>
+                <td class="name">Normality of residuals (skew + kurtosis)</td>
+                <td x-text="model && fmt(model.diagnostics.jb.stat, 3) + '  (df 2)'"></td>
+                <td x-text="model && fmtP(model.diagnostics.jb.p)"></td>
+                <td>
+                  <span class="pill" :class="pTestVerdict(model && model.diagnostics.jb.p, 'normality').cls"
+                        x-text="pTestVerdict(model && model.diagnostics.jb.p, 'normality').text"></span>
+                </td>
+              </tr>
+              <!-- Shapiro-Wilk -->
+              <tr x-show="model && model.diagnostics">
+                <td class="name">Shapiro-Wilk</td>
+                <td class="name">Normality of residuals</td>
+                <td x-text="model && 'W = ' + fmt(model.diagnostics.sw.stat, 4)"></td>
+                <td x-text="model && fmtP(model.diagnostics.sw.p)"></td>
+                <td>
+                  <span class="pill" :class="pTestVerdict(model && model.diagnostics.sw.p, 'normality').cls"
+                        x-text="pTestVerdict(model && model.diagnostics.sw.p, 'normality').text"></span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p style="font-size: 0.78rem; color: var(--pico-muted-color); margin-top: 0.75rem">
+            Skewness:
+            <code x-text="model && model.diagnostics && fmt(model.diagnostics.jb.skewness, 3)"></code>
+            ·  Kurtosis:
+            <code x-text="model && model.diagnostics && fmt(model.diagnostics.jb.kurtosis, 3)"></code>
+            (3 = normal)
+          </p>
+        </article>
+
+        <!-- Influence: leverage + Cook's, with top influential rows -->
+        <article class="panel" x-show="model && model.diagnostics">
+          <h2 class="panel-title">Influence diagnostics</h2>
+
+          <div class="stat-grid" style="margin-bottom: 0.75rem">
+            <div class="stat" title="Threshold above which Cook's distance flags a row as influential.">
+              <span class="stat-label">Cook's threshold (4/n)</span>
+              <span class="stat-value" x-text="model && fmt(model.diagnostics.cookThreshold, 4)"></span>
+            </div>
+            <div class="stat" title="Leverage above this hat-matrix value is high (≈ 2 p / n).">
+              <span class="stat-label">Leverage threshold (2 p/n)</span>
+              <span class="stat-value" x-text="model && fmt(model.diagnostics.leverageThreshold, 4)"></span>
+            </div>
+            <div class="stat" title="Number of observations exceeding the Cook's threshold.">
+              <span class="stat-label">Influential rows</span>
+              <span class="stat-value" x-text="model ? model.diagnostics.influentialIdx.length : 0"></span>
+            </div>
+            <div class="stat" title="Maximum Cook's distance observed.">
+              <span class="stat-label">Max Cook's</span>
+              <span class="stat-value" x-text="model && fmt(maxCooks(model), 4)"></span>
+            </div>
+          </div>
+
+          <div x-show="model && model.diagnostics && model.diagnostics.influentialIdx.length === 0"
+               style="font-size: 0.85rem; color: var(--pico-muted-color)">
+            No observations exceed the Cook's threshold (4/n). All points appear non-influential.
+          </div>
+
+          <div x-show="model && model.diagnostics && model.diagnostics.influentialIdx.length > 0">
+            <table class="coef-table">
+              <thead>
+                <tr>
+                  <th>Row (1-based)</th>
+                  <th>Leverage</th>
+                  <th>Stud. residual</th>
+                  <th>Cook's D</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="i in topInfluential(model)" :key="i">
+                  <tr>
+                    <td x-text="i + 1"></td>
+                    <td x-text="model && fmt(model.diagnostics.leverage[i], 4)"></td>
+                    <td x-text="model && fmt(model.diagnostics.studResid[i], 3)"></td>
+                    <td x-text="model && fmt(model.diagnostics.cooks[i], 4)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+            <p style="font-size: 0.75rem; color: var(--pico-muted-color); margin-top: 0.5rem">
+              Showing rows with Cook's D &gt; threshold, sorted by Cook's descending.
+              Refit excluding these and compare β to gauge influence.
+            </p>
+          </div>
+        </article>
+
+        <!-- HC3 banner if active -->
+        <article class="panel" x-show="model && model.activeSEKind === 'HC3'">
+          <span class="pill info"><span class="dot"></span>HC3 robust standard errors active</span>
+          <p style="margin: 0.5rem 0 0 0; font-size: 0.85rem">
+            The Coefficients table now reports MacKinnon-White HC3
+            heteroscedasticity-consistent standard errors. Untoggle <em>Robust SE</em>
+            and refit to restore classical SE.
+          </p>
         </article>
       </div>
 
@@ -2448,6 +2590,24 @@
             // tab when the user has the toggle on).
             model.robustSE = this.config.robustSE;
             Diag.compute(model);
+            // If the user requested HC3, swap the active SE / t / p / CI
+            // columns on the model so the Coefficients tab and headline
+            // p-values reflect the robust inference. Keep the classical
+            // values aside so a later toggle-off can restore them and
+            // so reports can show both.
+            if (model.diagnostics.hc3) {
+              model.classicalSE = model.se;
+              model.classicalT  = model.t;
+              model.classicalP  = model.p;
+              model.classicalCI = model.ci;
+              model.se = model.diagnostics.hc3.se;
+              model.t  = model.diagnostics.hc3.t;
+              model.p  = model.diagnostics.hc3.p;
+              model.ci = model.diagnostics.hc3.ci;
+              model.activeSEKind = "HC3";
+            } else {
+              model.activeSEKind = "classical";
+            }
             model.interp = Interpret.run(model);
             this.model = model;
             this.ui.specDirty = false;
@@ -2495,6 +2655,36 @@
           if (ax !== 0 && (ax < 1e-3 || ax >= 1e6)) return x.toExponential(digits - 1);
           return x.toFixed(digits);
         },
+        /* Verdict pill content for diagnostic tests. cls drives the
+           severity colour; text is the headline label. */
+        dwVerdict(dw) {
+          if (dw === undefined || dw === null || Number.isNaN(dw)) return { cls: "info", text: "—" };
+          if (dw < 1.5)  return { cls: "warn",     text: "positive autocorr. (DW < 1.5)" };
+          if (dw > 2.5)  return { cls: "warn",     text: "negative autocorr. (DW > 2.5)" };
+          return                  { cls: "note",   text: "no autocorrelation evidence" };
+        },
+        pTestVerdict(p, what) {
+          if (p === undefined || p === null || Number.isNaN(p)) return { cls: "info", text: "—" };
+          if (p < 0.01) return { cls: "critical", text: what + " rejected (p<0.01)" };
+          if (p < 0.05) return { cls: "warn",     text: what + " rejected (p<0.05)" };
+          if (p < 0.10) return { cls: "info",     text: "borderline (0.05<p<0.10)" };
+          return                { cls: "note",   text: what + " not rejected" };
+        },
+        // Maximum Cook's value over all observations.
+        maxCooks(m) {
+          if (!m || !m.diagnostics || !m.diagnostics.cooks) return NaN;
+          let mx = 0;
+          for (const c of m.diagnostics.cooks) if (Number.isFinite(c) && c > mx) mx = c;
+          return mx;
+        },
+        // Indices flagged as influential, sorted by Cook's descending.
+        topInfluential(m) {
+          if (!m || !m.diagnostics) return [];
+          const idx = m.diagnostics.influentialIdx.slice();
+          idx.sort((a, b) => m.diagnostics.cooks[b] - m.diagnostics.cooks[a]);
+          return idx.slice(0, 12);
+        },
+
         // p-values get special treatment: report < 0.001 / < 0.0001 etc.
         fmtP(p) {
           if (p === null || p === undefined || Number.isNaN(p)) return "—";
