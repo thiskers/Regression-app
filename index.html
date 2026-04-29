@@ -2246,19 +2246,251 @@
       return { compute, _internal: { leverages, jarqueBera, shapiroWilk, breuschPagan, durbinWatson, vifs } };
     })();
 
+    /* ===== 5. Plots =====
+       Plotly figure factories. Each public method takes (model, divEl)
+       and renders a single plot via Plotly.newPlot. renderAll(model)
+       finds the divs by id and dispatches. Step 10 ships the four core
+       OLS diagnostic figures; Step 11 adds the rest. */
     const Plots = (function () {
-      // _theme returns a Plotly layout fragment shared across figures.
-      // renderAll is a no-op pre-Step-10 so fit() can call it safely.
+
+      function _theme() {
+        const dark = document.documentElement.getAttribute("data-theme") === "dark";
+        return {
+          paper_bgcolor: "rgba(0,0,0,0)",
+          plot_bgcolor:  "rgba(0,0,0,0)",
+          font: { family: 'system-ui, -apple-system, "Segoe UI", sans-serif', size: 12, color: dark ? "#e6edf3" : "#2c333b" },
+          margin: { l: 56, r: 24, t: 40, b: 48 },
+          showlegend: true,
+          legend: {
+            x: 1, xanchor: "right", y: 1, yanchor: "top",
+            bgcolor: dark ? "rgba(20,24,30,0.6)" : "rgba(255,255,255,0.7)",
+            bordercolor: dark ? "#404040" : "#e5e7eb", borderwidth: 1,
+            font: { size: 11 },
+          },
+          hovermode: "closest",
+          xaxis: { gridcolor: dark ? "#2a3038" : "#e5e7eb", zeroline: false, title: { font: { size: 12 } } },
+          yaxis: { gridcolor: dark ? "#2a3038" : "#e5e7eb", zeroline: false, title: { font: { size: 12 } } },
+        };
+      }
+
+      const _config = {
+        displaylogo: false,
+        responsive: true,
+        toImageButtonOptions: { format: "png", scale: 2 },
+        modeBarButtonsToRemove: ["select2d", "lasso2d", "autoScale2d", "toggleSpikelines"],
+      };
+
+      // Brand colours used across all figures.
+      const C = {
+        point:    "#2563eb",   // blue-600
+        line:     "#dc2626",   // red-600
+        ci:       "rgba(37, 99, 235, 0.22)",
+        pi:       "rgba(96, 165, 250, 0.13)",
+        ref:      "#94a3b8",   // slate-400
+        warn:     "#f59e0b",   // amber-500
+      };
+
+      /* ---- LOWESS smoother (local linear, tricube weights).
+             Used as the trend overlay on residual / scale-location
+             plots so subtle nonlinearity / heteroscedasticity is
+             readable at a glance.                                       */
+      function _lowess(xs, ys, frac = 0.6) {
+        const n = xs.length;
+        if (n < 4) return { xq: xs.slice(), yq: ys.slice() };
+        const k = Math.max(3, Math.floor(frac * n));
+        const order = xs.map((_, i) => i).sort((a, b) => xs[a] - xs[b]);
+        const xS = order.map((i) => xs[i]);
+        const yS = order.map((i) => ys[i]);
+        const yq = new Array(n);
+        for (let i = 0; i < n; i++) {
+          const x0 = xS[i];
+          // k-th nearest distance
+          const dists = xS.map((xj) => Math.abs(xj - x0));
+          const sd = dists.slice().sort((a, b) => a - b);
+          const dmax = sd[k - 1] || 1;
+          let sw = 0, swx = 0, swy = 0, swxx = 0, swxy = 0;
+          for (let j = 0; j < n; j++) {
+            const d = dmax > 0 ? Math.abs(xS[j] - x0) / dmax : 0;
+            if (d >= 1) continue;
+            const w = (1 - d * d * d) ** 3;
+            sw   += w;
+            swx  += w * xS[j];
+            swy  += w * yS[j];
+            swxx += w * xS[j] * xS[j];
+            swxy += w * xS[j] * yS[j];
+          }
+          const denom = sw * swxx - swx * swx;
+          if (Math.abs(denom) < 1e-12) { yq[i] = sw > 0 ? swy / sw : yS[i]; continue; }
+          const slope = (sw * swxy - swx * swy) / denom;
+          const intercept = (swy - slope * swx) / sw;
+          yq[i] = intercept + slope * x0;
+        }
+        return { xq: xS, yq };
+      }
+
+      /* ---- Helpers ---- */
+      function _placeholder(el, msg) {
+        if (!el) return;
+        if (window.Plotly) window.Plotly.purge(el);
+        el.innerHTML = `<p style="padding: 1rem; color: var(--pico-muted-color); font-size: 0.85rem">${msg}</p>`;
+      }
+      // Use the bisection inverse-t already implemented in Stats._internal.
+      function _tCrit(alpha, df) {
+        return (Stats._internal && Stats._internal.tInverse) ? Stats._internal.tInverse(1 - alpha / 2, df) : 1.96;
+      }
+
+      /* ---- Figure 1: scatter with fit + 95% CI + 95% PI bands.
+             Only meaningful for simple linear regression (1 numeric
+             predictor, intercept). Beyond that the geometry isn't 2D. */
+      function scatterFit(model, el) {
+        const isSimple = model.spec.hasIntercept && model.spec.p === 2;
+        if (!isSimple) {
+          _placeholder(el, "Scatter+fit is shown for simple linear regression only (1 predictor + intercept).");
+          return;
+        }
+        const xCol = model.X.map((r) => r[1]);
+        const y    = model.y.slice();
+        const xName = model.spec.predictorNames[1];
+        const yName = model.spec.response;
+
+        // Fit curve over a fine grid.
+        let xMin = Math.min(...xCol), xMax = Math.max(...xCol);
+        const pad = 0.05 * (xMax - xMin || 1);
+        xMin -= pad; xMax += pad;
+        const grid = [];
+        for (let i = 0; i <= 120; i++) grid.push(xMin + i * (xMax - xMin) / 120);
+        const yhat = grid.map((xg) => model.beta[0] + model.beta[1] * xg);
+
+        // Bands.
+        const xMean = NumLib.mean(xCol);
+        const sxx   = xCol.reduce((s, xi) => s + (xi - xMean) ** 2, 0);
+        const tCrit = _tCrit(0.05, model.spec.n - model.spec.p);
+        const seFit = grid.map((xg) => model.rmse * Math.sqrt(1 / model.spec.n + ((xg - xMean) ** 2) / sxx));
+        const sePred = grid.map((xg) => model.rmse * Math.sqrt(1 + 1 / model.spec.n + ((xg - xMean) ** 2) / sxx));
+        const ciHi = yhat.map((y, i) => y + tCrit * seFit[i]);
+        const ciLo = yhat.map((y, i) => y - tCrit * seFit[i]);
+        const piHi = yhat.map((y, i) => y + tCrit * sePred[i]);
+        const piLo = yhat.map((y, i) => y - tCrit * sePred[i]);
+
+        const traces = [
+          { x: grid, y: piHi, mode: "lines", line: { width: 0 }, hoverinfo: "skip", showlegend: false },
+          { x: grid, y: piLo, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: C.pi, hoverinfo: "skip", name: "95 % PI" },
+          { x: grid, y: ciHi, mode: "lines", line: { width: 0 }, hoverinfo: "skip", showlegend: false },
+          { x: grid, y: ciLo, mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: C.ci, hoverinfo: "skip", name: "95 % CI" },
+          { x: xCol, y: y, mode: "markers", name: "Observations", marker: { size: 7, color: C.point, line: { width: 0.5, color: "white" } } },
+          { x: grid, y: yhat, mode: "lines", name: "OLS fit", line: { color: C.line, width: 2.5 } },
+        ];
+        const layout = Object.assign(_theme(), {
+          title: { text: `${yName} ~ ${xName}`, font: { size: 14 } },
+          xaxis: Object.assign({}, _theme().xaxis, { title: { text: xName } }),
+          yaxis: Object.assign({}, _theme().yaxis, { title: { text: yName } }),
+        });
+        window.Plotly.newPlot(el, traces, layout, _config);
+      }
+
+      /* ---- Figure 2: residuals vs fitted + LOWESS overlay.
+             Flags nonlinearity (curved LOWESS) and rough scale shifts. */
+      function residFitted(model, el) {
+        const xs = model.fitted.slice();
+        const rs = model.residuals.slice();
+        const sm = _lowess(xs, rs, 0.6);
+        const xMin = Math.min(...xs), xMax = Math.max(...xs);
+        const traces = [
+          { x: xs, y: rs, mode: "markers", name: "residuals", marker: { size: 6, color: C.point, opacity: 0.85 },
+            text: rs.map((_, i) => `row ${i + 1}`), hovertemplate: "%{text}<br>fitted=%{x:.3f}<br>resid=%{y:.3f}<extra></extra>" },
+          { x: sm.xq, y: sm.yq, mode: "lines", name: "LOWESS", line: { color: C.line, width: 2 }, hoverinfo: "skip" },
+        ];
+        const layout = Object.assign(_theme(), {
+          title: { text: "Residuals vs. Fitted", font: { size: 14 } },
+          xaxis: Object.assign({}, _theme().xaxis, { title: { text: "Fitted values" } }),
+          yaxis: Object.assign({}, _theme().yaxis, { title: { text: "Residuals" } }),
+          shapes: [{ type: "line", x0: xMin, x1: xMax, y0: 0, y1: 0, line: { color: C.ref, width: 1, dash: "dot" } }],
+        });
+        window.Plotly.newPlot(el, traces, layout, _config);
+      }
+
+      /* ---- Figure 3: Normal Q-Q of studentized residuals.
+             Reference line through Q1 / Q3 of empirical and theoretical
+             quantiles (R's `qqline` default).                            */
+      function qqNormal(model, el) {
+        const stud = (model.diagnostics && model.diagnostics.studResid) || [];
+        if (stud.length < 3) { _placeholder(el, "Need ≥ 3 observations."); return; }
+        const sorted = stud.slice().sort((a, b) => a - b);
+        const n = sorted.length;
+        const theoretical = sorted.map((_, i) => NumLib.normInv((i + 0.5) / n));
+        // Q1-Q3 reference line, robust to outliers.
+        const q25 = NumLib.quantile(sorted, 0.25);
+        const q75 = NumLib.quantile(sorted, 0.75);
+        const z25 = NumLib.normInv(0.25);
+        const z75 = NumLib.normInv(0.75);
+        const slope = (q75 - q25) / (z75 - z25);
+        const intercept = q25 - slope * z25;
+        const refX = [theoretical[0] - 0.2, theoretical[n - 1] + 0.2];
+        const refY = refX.map((x) => intercept + slope * x);
+        const traces = [
+          { x: refX, y: refY, mode: "lines", name: "Q1–Q3 ref", line: { color: C.ref, dash: "dash", width: 1.5 }, hoverinfo: "skip" },
+          { x: theoretical, y: sorted, mode: "markers", name: "stud. residuals",
+            marker: { size: 6, color: C.point },
+            hovertemplate: "theoretical=%{x:.3f}<br>sample=%{y:.3f}<extra></extra>" },
+        ];
+        const layout = Object.assign(_theme(), {
+          title: { text: "Normal Q-Q", font: { size: 14 } },
+          xaxis: Object.assign({}, _theme().xaxis, { title: { text: "Theoretical quantile" } }),
+          yaxis: Object.assign({}, _theme().yaxis, { title: { text: "Studentised residual" } }),
+        });
+        window.Plotly.newPlot(el, traces, layout, _config);
+      }
+
+      /* ---- Figure 4: scale-location plot.
+             √|standardised residual| vs fitted, with LOWESS overlay.
+             Flat trend means homoscedastic; rising trend = heterosc.    */
+      function scaleLocation(model, el) {
+        const stud = (model.diagnostics && model.diagnostics.studResid) || [];
+        if (stud.length === 0) { _placeholder(el, "Diagnostics not yet computed."); return; }
+        const xs = model.fitted.slice();
+        const ys = stud.map((s) => Math.sqrt(Math.abs(s)));
+        const sm = _lowess(xs, ys, 0.6);
+        const traces = [
+          { x: xs, y: ys, mode: "markers", name: "√|stud. resid|", marker: { size: 6, color: C.point, opacity: 0.85 },
+            text: ys.map((_, i) => `row ${i + 1}`), hovertemplate: "%{text}<br>fitted=%{x:.3f}<br>√|stud|=%{y:.3f}<extra></extra>" },
+          { x: sm.xq, y: sm.yq, mode: "lines", name: "LOWESS", line: { color: C.line, width: 2 }, hoverinfo: "skip" },
+        ];
+        const layout = Object.assign(_theme(), {
+          title: { text: "Scale-Location", font: { size: 14 } },
+          xaxis: Object.assign({}, _theme().xaxis, { title: { text: "Fitted values" } }),
+          yaxis: Object.assign({}, _theme().yaxis, { title: { text: "√|standardised residual|" } }),
+        });
+        window.Plotly.newPlot(el, traces, layout, _config);
+      }
+
+      /* ---- renderAll(model) — orchestrator.
+             Walks the known plot div ids and dispatches. Plots whose
+             div doesn't exist (yet — e.g. Step 11 plots) are skipped.
+             Plotly calls only run when window.Plotly is available, so
+             this is safe to call before the lib finishes loading. */
+      function renderAll(model) {
+        if (!model || !window.Plotly) return;
+        const get = (id) => document.getElementById(id);
+        const dispatch = [
+          ["plot-scatterFit",    scatterFit],
+          ["plot-residFitted",   residFitted],
+          ["plot-qqNormal",      qqNormal],
+          ["plot-scaleLocation", scaleLocation],
+        ];
+        for (const [id, fn] of dispatch) {
+          const el = get(id);
+          if (el) try { fn(model, el); } catch (e) { console.error("[regapp] plot", id, "failed:", e); _placeholder(el, "Plot failed: " + e.message); }
+        }
+      }
+
       return {
-        _theme()                  { return {}; },
-        renderAll(/* model */)    { /* populated in Steps 10-11 */ },
-        scatterFit:    _NI("Plots.scatterFit",    10),
-        residFitted:   _NI("Plots.residFitted",   10),
-        qqNormal:      _NI("Plots.qqNormal",      10),
-        scaleLocation: _NI("Plots.scaleLocation", 10),
-        residLeverage: _NI("Plots.residLeverage",   11),
-        residHistogram:_NI("Plots.residHistogram",  11),
-        corrHeatmap:   _NI("Plots.corrHeatmap",     11),
+        _theme, _config, _lowess,
+        renderAll,
+        scatterFit, residFitted, qqNormal, scaleLocation,
+        // Step 11 placeholders so the namespace shape stays stable.
+        residLeverage:     _NI("Plots.residLeverage",     11),
+        residHistogram:    _NI("Plots.residHistogram",    11),
+        corrHeatmap:       _NI("Plots.corrHeatmap",       11),
         partialRegression: _NI("Plots.partialRegression", 11),
         predictedActual:   _NI("Plots.predictedActual",   11),
         coefForest:        _NI("Plots.coefForest",        11),
