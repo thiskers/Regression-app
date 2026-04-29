@@ -623,7 +623,8 @@
             </span>
           </p>
 
-          <div class="stat-grid">
+          <!-- OLS stat grid -->
+          <div class="stat-grid" x-show="model && model.family !== 'logistic'">
             <div class="stat" title="Coefficient of determination — fraction of variance explained.">
               <span class="stat-label">R²</span>
               <span class="stat-value" x-text="model && fmt(model.r2, 4)"></span>
@@ -655,6 +656,42 @@
             <div class="stat" title="Residual degrees of freedom (n − p).">
               <span class="stat-label">df</span>
               <span class="stat-value" x-text="model && (model.spec.n - model.spec.p)"></span>
+            </div>
+          </div>
+
+          <!-- Logistic stat grid -->
+          <div class="stat-grid" x-show="model && model.family === 'logistic'">
+            <div class="stat" title="McFadden's pseudo-R² = 1 − deviance / null deviance.">
+              <span class="stat-label">Pseudo-R² (McFadden)</span>
+              <span class="stat-value" x-text="model && fmt(model.mcFaddenR2, 4)"></span>
+            </div>
+            <div class="stat" title="Area under the ROC curve — probability the model ranks a random positive above a random negative.">
+              <span class="stat-label">AUC</span>
+              <span class="stat-value" x-text="model && fmt(model.auc, 4)"></span>
+            </div>
+            <div class="stat" title="Classification accuracy at the threshold.">
+              <span class="stat-label">Accuracy</span>
+              <span class="stat-value" x-text="model && model.confusion && fmt(model.confusion.accuracy, 4)"></span>
+            </div>
+            <div class="stat" title="Likelihood-ratio χ² statistic and p-value vs intercept-only model.">
+              <span class="stat-label">LR χ² (df <span x-text="model && model.lrDf"></span>)</span>
+              <span class="stat-value" x-text="model && fmt(model.lrChi2, 2) + '   p=' + fmtP(model.lrPval)"></span>
+            </div>
+            <div class="stat" title="Residual deviance ( −2 log L ).">
+              <span class="stat-label">Deviance / null</span>
+              <span class="stat-value" x-text="model && fmt(model.deviance, 1) + ' / ' + fmt(model.nullDeviance, 1)"></span>
+            </div>
+            <div class="stat" title="Akaike / Bayesian information criteria.">
+              <span class="stat-label">AIC / BIC</span>
+              <span class="stat-value" x-text="model && (fmt(model.aic, 1) + ' / ' + fmt(model.bic, 1))"></span>
+            </div>
+            <div class="stat" title="IRLS Newton-Raphson convergence and iterations used.">
+              <span class="stat-label">Convergence</span>
+              <span class="stat-value" x-text="model ? (model.converged ? '✓ ' + model.iterations + ' iter' : '✗ NOT converged') : ''"></span>
+            </div>
+            <div class="stat" title="Confusion matrix at the configured threshold.">
+              <span class="stat-label">TP / FP / TN / FN</span>
+              <span class="stat-value" x-text="model && model.confusion && (model.confusion.tp + ' / ' + model.confusion.fp + ' / ' + model.confusion.tn + ' / ' + model.confusion.fn)"></span>
             </div>
           </div>
         </article>
@@ -964,26 +1001,125 @@
 
             <!-- Partial-regression plots span full width since they
                  are themselves a small-multiples grid. -->
-            <div style="grid-column: 1 / -1">
+            <div style="grid-column: 1 / -1" x-show="model && model.family !== 'logistic'">
               <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
                 Partial regression (added-variable plots)
               </h3>
               <div id="plot-partialRegression" class="plot" style="min-height: 240px"></div>
             </div>
-          </div>
 
-          <p style="font-size: 0.75rem; color: var(--pico-muted-color); margin-top: 1rem">
-            ROC and calibration plots ship in Step 13 with logistic regression.
-          </p>
+            <!-- ROC + calibration appear only for logistic models. -->
+            <div x-show="model && model.family === 'logistic'">
+              <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
+                ROC curve
+              </h3>
+              <div id="plot-roc" class="plot"></div>
+            </div>
+
+            <div x-show="model && model.family === 'logistic'">
+              <h3 style="font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 600">
+                Calibration (decile bins)
+              </h3>
+              <div id="plot-calibration" class="plot"></div>
+            </div>
+          </div>
         </article>
       </div>
 
       <!-- Tab: Predictions -->
       <div class="tab-panel" x-show="ui.activeTab === 'predictions'">
-        <article class="panel">
+        <article class="panel" x-show="!model">
           <h2 class="panel-title">Predictions</h2>
-          <p style="color: var(--pico-muted-color)">Single-row predictor form + bulk CSV prediction — Step 13.</p>
+          <p style="color: var(--pico-muted-color)">Fit a model first.</p>
         </article>
+
+        <article class="panel" x-show="model">
+          <h2 class="panel-title">Single prediction</h2>
+          <p style="font-size: 0.85rem; color: var(--pico-muted-color); margin-top: 0.25rem">
+            Inputs are pre-filled with each predictor's training-set mean (or first level).
+            Edit and click <strong>Predict</strong> for
+            <span x-show="model && model.family === 'logistic'">predicted probability with 95 % CI</span>
+            <span x-show="model && model.family !== 'logistic'">ŷ with 95 % confidence + 95 % prediction intervals</span>.
+          </p>
+
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; margin-top: 0.75rem">
+            <template x-for="name in (spec.predictors || [])" :key="name">
+              <div class="field" style="margin: 0">
+                <label :for="'pred-input-' + name" x-text="name" style="font-size: 0.8rem; font-family: var(--app-mono)"></label>
+                <template x-if="dataset.columns.find(c => c.name === name) && dataset.columns.find(c => c.name === name).type === 'string'">
+                  <select :id="'pred-input-' + name"
+                          x-model="ui.predInputs[name]"
+                          style="margin: 0; padding: 0.3rem 0.5rem; font-size: 0.85rem">
+                    <template x-for="lvl in levelsFor(name)" :key="lvl">
+                      <option :value="lvl" x-text="lvl"></option>
+                    </template>
+                  </select>
+                </template>
+                <template x-if="!(dataset.columns.find(c => c.name === name) && dataset.columns.find(c => c.name === name).type === 'string')">
+                  <input :id="'pred-input-' + name"
+                         type="number" step="any"
+                         x-model="ui.predInputs[name]"
+                         style="margin: 0; padding: 0.3rem 0.5rem; font-size: 0.85rem">
+                </template>
+              </div>
+            </template>
+          </div>
+
+          <div style="display: flex; gap: 0.5rem; margin-top: 1rem; align-items: center">
+            <button @click="computePrediction()" style="margin: 0; padding: 0.4rem 1rem">Predict</button>
+            <button class="secondary" @click="seedPredInputs(); ui.predResult = null"
+                    style="margin: 0; padding: 0.4rem 0.8rem; font-size: 0.85rem">Reset to means</button>
+            <span x-show="ui.predError" class="pill critical" style="margin-left: 0.75rem">
+              <span class="dot"></span><span x-text="ui.predError"></span>
+            </span>
+          </div>
+        </article>
+
+        <!-- OLS result -->
+        <article class="panel" x-show="model && ui.predResult && ui.predResult.kind === 'ols'">
+          <h2 class="panel-title">Result</h2>
+          <div class="stat-grid">
+            <div class="stat">
+              <span class="stat-label" x-text="'Predicted ' + (ui.predResult ? ui.predResult.response : '')"></span>
+              <span class="stat-value" x-text="ui.predResult && fmt(ui.predResult.yhat, 4)"></span>
+            </div>
+            <div class="stat" title="Confidence interval for the conditional mean.">
+              <span class="stat-label">95 % CI (mean)</span>
+              <span class="stat-value" x-text="ui.predResult && '[' + fmt(ui.predResult.ciLow, 4) + ', ' + fmt(ui.predResult.ciHigh, 4) + ']'"></span>
+            </div>
+            <div class="stat" title="Prediction interval for a new individual observation — wider than CI.">
+              <span class="stat-label">95 % PI (new obs.)</span>
+              <span class="stat-value" x-text="ui.predResult && '[' + fmt(ui.predResult.piLow, 4) + ', ' + fmt(ui.predResult.piHigh, 4) + ']'"></span>
+            </div>
+          </div>
+        </article>
+
+        <!-- Logistic result -->
+        <article class="panel" x-show="model && ui.predResult && ui.predResult.kind === 'logistic'">
+          <h2 class="panel-title">Result</h2>
+          <div class="stat-grid">
+            <div class="stat" title="Predicted probability of the positive class.">
+              <span class="stat-label" x-text="'P(' + (ui.predResult ? (ui.predResult.positive || 'positive') : '') + ')'"></span>
+              <span class="stat-value" x-text="ui.predResult && fmt(ui.predResult.phat, 4)"></span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">95 % CI</span>
+              <span class="stat-value" x-text="ui.predResult && '[' + fmt(ui.predResult.ciLow, 4) + ', ' + fmt(ui.predResult.ciHigh, 4) + ']'"></span>
+            </div>
+            <div class="stat" title="Predicted class at the configured threshold.">
+              <span class="stat-label">Predicted class (≥ <span x-text="ui.predResult ? ui.predResult.threshold : ''"></span>)</span>
+              <span class="stat-value" x-text="ui.predResult && ui.predResult.predictedClass"></span>
+            </div>
+            <div class="stat" title="Linear predictor (log-odds).">
+              <span class="stat-label">η  (log-odds)</span>
+              <span class="stat-value" x-text="ui.predResult && fmt(ui.predResult.eta, 3)"></span>
+            </div>
+          </div>
+        </article>
+
+        <p style="font-size: 0.78rem; color: var(--pico-muted-color); padding: 0 1rem; margin-top: 1rem">
+          Bulk prediction on a CSV upload arrives in the Report-export pass (Step 15).
+        </p>
       </div>
 
       <!-- Tab: Interpretation -->
@@ -1952,16 +2088,25 @@
         let y, responseLevels = null;
         if (spec.family === "logistic" && types[responseName] === "string") {
           const raw = validIdx.map((i) => rows[i][responseName]);
-          const unique = Array.from(new Set(raw)).sort();
-          if (unique.length !== 2) {
-            throw new Error(`Logistic response "${responseName}" must have exactly 2 distinct values; found ${unique.length}.`);
+          // For prediction (skipSizeCheck) the caller passes the trained
+          // responseLevels so we don't need (and shouldn't expect) two
+          // distinct values in the single-row input.
+          let positive, negative;
+          if (spec.skipSizeCheck && spec.responseLevels) {
+            positive = spec.responseLevels.positive;
+            negative = spec.responseLevels.negative;
+          } else {
+            const unique = Array.from(new Set(raw)).sort();
+            if (unique.length !== 2) {
+              throw new Error(`Logistic response "${responseName}" must have exactly 2 distinct values; found ${unique.length}.`);
+            }
+            positive = unique[1]; negative = unique[0];
           }
-          const positive = unique[1];
           y = raw.map((v) => v === positive ? 1 : 0);
-          responseLevels = { positive, negative: unique[0] };
+          responseLevels = { positive, negative };
         } else {
           y = validIdx.map((i) => valueAt(i, responseName));
-          if (spec.family === "logistic") {
+          if (spec.family === "logistic" && !spec.skipSizeCheck) {
             // Sanity-check that numeric response is binary 0/1.
             const ok = y.every((v) => v === 0 || v === 1);
             if (!ok) throw new Error(`Logistic response "${responseName}" must be 0/1 — got non-binary numeric values.`);
@@ -1974,7 +2119,13 @@
         for (const name of predictorNames) {
           const colVals = validIdx.map((i) => rows[i][name]);
           if (types[name] === "string") {
-            const unique = Array.from(new Set(colVals.filter((v) => !isMissing(v)))).sort();
+            // For prediction reuse, the caller can pass the levels seen
+            // at training so dummy encoding stays consistent even when
+            // the new data only contains a subset of them (e.g. a single
+            // row). Otherwise we infer levels from the current data.
+            const unique = (spec.stringLevels && spec.stringLevels[name])
+              ? spec.stringLevels[name].slice()
+              : Array.from(new Set(colVals.filter((v) => !isMissing(v)))).sort();
             const ref = (spec.referenceLevels && spec.referenceLevels[name]) || unique[0];
             for (const lvl of unique) {
               if (lvl === ref) continue;
@@ -2021,14 +2172,30 @@
         if (dropped.length > 0) {
           warnings.push(`Listwise deletion dropped ${dropped.length} of ${rows.length} rows due to missing values.`);
         }
-        if (X.length <= xCols.length) {
+        // The n > p check is a fitting requirement; the Predictions tab
+        // calls buildDesign on a single row purely to apply the encoding
+        // pipeline, so it passes spec.skipSizeCheck.
+        if (!spec.skipSizeCheck && X.length <= xCols.length) {
           throw new Error(`Only ${X.length} usable rows after preprocessing — need more than ${xCols.length} for ${xCols.length} predictors.`);
         }
+
+        // Capture the training-set string-column level lists so the
+        // Predictions tab can re-encode new rows consistently.
+        const stringLevels = {};
+        for (const name of predictorNames) {
+          if (types[name] === "string") {
+            stringLevels[name] = (spec.stringLevels && spec.stringLevels[name])
+              ? spec.stringLevels[name].slice()
+              : Array.from(new Set(rows.map((r) => r[name]).filter((v) => !isMissing(v)))).sort();
+          }
+        }
+
         return {
           X, y,
           names: xCols.map((c) => c.name),
           response: responseName,
           responseLevels,
+          stringLevels,
           dropped: dropped.length,
           warnings,
         };
@@ -2136,6 +2303,8 @@
           // BP / influence) and Plots (partial regression). Stored as the
           // raw 2D arrays passed in — cheap, and Diag/Plots want arrays.
           X, y,
+          // Parameter covariance for the Predictions tab (CI + PI on ŷ).
+          XtXinv: XtXinv,
         };
       }
 
@@ -2283,11 +2452,11 @@
         }
         const Xm = new M(p, p);
         for (let j = 0; j < p; j++) for (let k = 0; k < p; k++) Xm.set(j, k, Xt[j * p + k]);
-        let seBeta;
+        let seBeta, XtWXinv = null;
         try {
-          const Xmi = inv(Xm);
+          XtWXinv = inv(Xm);
           seBeta = [];
-          for (let j = 0; j < p; j++) seBeta.push(Math.sqrt(Math.max(0, Xmi.get(j, j))));
+          for (let j = 0; j < p; j++) seBeta.push(Math.sqrt(Math.max(0, XtWXinv.get(j, j))));
         } catch (e) {
           separationFlag = true;
           seBeta = new Array(p).fill(NaN);
@@ -2372,6 +2541,8 @@
           diagnostics: {},
           interp: null,
           X, y,
+          // Parameter covariance for Predictions tab (CI on η̂ → CI on p̂).
+          XtWXinv,
         };
       }
 
@@ -3411,11 +3582,13 @@
           render:  (m) => `Overall F-test is significant (F = ${_fmt(m.fStat, 3)} on ${m.fDf1} and ${m.fDf2} df, p = ${_fmtP(m.fPval)}) — the model explains <code>${m.spec.response}</code> better than the mean alone.`,
         },
 
-        /* ---- Section: predictor effects (one-rule-many-statements) ---- */
+        /* ---- Section: predictor effects (one-rule-many-statements).
+               Logistic gets odds-ratio language; OLS gets units-of-y. */
         {
           id: "predictor_effects", section: "predictors", severity: "info",
           applies: (m) => _slopeIdx(m).length > 0,
           render:  (m) => {
+            const isLog = m.family === "logistic";
             const out = [];
             for (const i of _slopeIdx(m)) {
               const name = m.spec.predictorNames[i];
@@ -3424,10 +3597,20 @@
               const p    = m.p[i];
               const dir  = b >= 0 ? "positive" : "negative";
               if (p < 0.05) {
-                out.push({
-                  severity: "info",
-                  text: `<code>${name}</code> shows a statistically significant <strong>${dir}</strong> association with <code>${m.spec.response}</code> (β = ${_fmt(b, 4)}, 95 % CI [${_fmt(ci[0], 4)}, ${_fmt(ci[1], 4)}], p = ${_fmtP(p)}). Holding other predictors constant, a one-unit increase in <code>${name}</code> is associated with ${b >= 0 ? "an increase" : "a decrease"} of ${_fmt(Math.abs(b), 4)} in <code>${m.spec.response}</code>.`,
-                });
+                if (isLog) {
+                  const or  = Math.exp(b);
+                  const lo  = Math.exp(ci[0]);
+                  const hi  = Math.exp(ci[1]);
+                  out.push({
+                    severity: "info",
+                    text: `<code>${name}</code> is significantly associated with the log-odds of <code>${m.spec.response}</code> (β = ${_fmt(b, 4)}, OR = ${_fmt(or, 3)}, 95 % CI for OR [${_fmt(lo, 3)}, ${_fmt(hi, 3)}], p = ${_fmtP(p)}). Each one-unit increase in <code>${name}</code> ${b >= 0 ? "multiplies" : "divides"} the odds by ${_fmt(b >= 0 ? or : 1 / or, 3)}, holding other predictors constant.`,
+                  });
+                } else {
+                  out.push({
+                    severity: "info",
+                    text: `<code>${name}</code> shows a statistically significant <strong>${dir}</strong> association with <code>${m.spec.response}</code> (β = ${_fmt(b, 4)}, 95 % CI [${_fmt(ci[0], 4)}, ${_fmt(ci[1], 4)}], p = ${_fmtP(p)}). Holding other predictors constant, a one-unit increase in <code>${name}</code> is associated with ${b >= 0 ? "an increase" : "a decrease"} of ${_fmt(Math.abs(b), 4)} in <code>${m.spec.response}</code>.`,
+                  });
+                }
               } else {
                 out.push({
                   severity: "note",
@@ -3520,6 +3703,18 @@
           render:  (m) => {
             const c = _curvature(m);
             return `Residuals are <strong>systematically curved</strong> against fitted values — the quadratic-of-fitted coefficient is significant (t = ${_fmt(c.t, 3)}, p = ${_fmtP(c.p)}) in an auxiliary regression of residuals on fitted + fitted². The linear fit's R² and per-predictor t-tests can't see this. Inspect Residuals-vs-Fitted, then try <em>family = polynomial</em> or a log / sqrt transform of the response.`;
+          },
+        },
+
+        /* ---- Logistic-only: separation / non-convergence. ---- */
+        {
+          id: "logistic_separation", section: "assumptions", severity: "critical",
+          applies: (m) => m.family === "logistic" && (m.separation === true || m.converged === false),
+          render:  (m) => {
+            const why = m.separation
+              ? "Coefficients diverged (|β| > 50) before the IRLS loop converged"
+              : `IRLS did not converge in ${m.iterations} iteration(s)`;
+            return `<strong>Logistic separation</strong> detected — ${why}. At least one predictor (or combination) almost-perfectly classifies the outcome, so the maximum-likelihood estimates of β are infinite. Standard errors and p-values are unreliable. Consider a penalised logistic (Firth or ridge), dropping the offending predictor, or collapsing classes.`;
           },
         },
 
@@ -3737,6 +3932,9 @@
           busy: false,
           pasteText: "",
           toast: null,
+          predInputs: {},
+          predResult: null,
+          predError: "",
         },
 
         /* ---- Errors collected from fit / parse / validation ---- */
@@ -3803,6 +4001,10 @@
           // refit happened on another tab.
           if (key === "plots" && this.model) {
             this.$nextTick(() => Plots.renderAll(this.model));
+          }
+          // Seed Predictions form with column means on first activation.
+          if (key === "predictions" && this.model && Object.keys(this.ui.predInputs).length === 0) {
+            this.seedPredInputs();
           }
         },
 
@@ -3968,6 +4170,9 @@
             // knows to materialise the HC3 bundle (used by Coefficients
             // tab when the user has the toggle on).
             model.robustSE = this.config.robustSE;
+            // Persist the training string levels so the Predictions tab
+            // can re-encode new rows without re-inferring from a 1-row sample.
+            model.stringLevels = design.stringLevels || {};
             Diag.compute(model);
             // If the user requested HC3, swap the active SE / t / p / CI
             // columns on the model so the Coefficients tab and headline
@@ -4004,6 +4209,131 @@
         runInterpretation() {
           if (!this.model) return;
           this.model.interp = Interpret.run(this.model);
+        },
+
+        /* =========================================================
+           Predictions — single-row form
+           ========================================================= */
+
+        // The Predictions form binds to ui.predInputs[colName].
+        // computePrediction takes that map, reuses Stats.buildDesign on a
+        // 1-row dataset, then computes ŷ ± 95 % CI (mean) and ± 95 % PI
+        // (new observation) via the model's stored XtXinv. Logistic uses
+        // η ± 1.96 SE(η) and maps back through σ for CI on p̂.
+        computePrediction() {
+          if (!this.model) return;
+          this.ui.predResult = null;
+          this.ui.predError = "";
+          try {
+            const row = {};
+            for (const c of this.dataset.columns) {
+              if (c.name === this.spec.response) continue;
+              if (!this.spec.predictors.includes(c.name)) continue;
+              const raw = this.ui.predInputs[c.name];
+              if (raw === undefined || raw === "" || raw === null) {
+                throw new Error(`Missing value for "${c.name}".`);
+              }
+              row[c.name] = (c.type === "string" || c.type === "binary") ? raw : Number(raw);
+              if (c.type === "numeric" && !Number.isFinite(row[c.name])) {
+                throw new Error(`"${c.name}" must be numeric.`);
+              }
+            }
+            // Add a placeholder response so buildDesign accepts the row.
+            // For string responses, use the negative level; numeric, use 0.
+            const respLevels = this.model.spec.responseLevels;
+            row[this.spec.response] = (respLevels && respLevels.negative !== undefined) ? respLevels.negative : 0;
+
+            // Reuse buildDesign with a single-row dataset to apply the same
+            // encoding / transform / polynomial pipeline as the fit.
+            // Pass training string levels so dummy encoding stays consistent
+            // even though only 1 level is present in this single row.
+            const oneRow = Stats.buildDesign([row], {
+              ...this.spec,
+              intercept:        this.config.intercept,
+              family:           this.config.family,
+              polynomialDegree: this.config.polynomialDegree,
+              missingPolicy:    "listwise",
+              stringLevels:     this.model.stringLevels || {},
+              responseLevels:   this.model.spec.responseLevels || null,
+              skipSizeCheck:    true,
+            });
+            const xnew = oneRow.X[0];
+
+            if (this.model.family === "logistic") {
+              const eta = xnew.reduce((s, x, j) => s + x * this.model.beta[j], 0);
+              // SE(η) via x' (X'WX)⁻¹ x.
+              let varEta = 0;
+              const C = this.model.XtWXinv;
+              if (C) {
+                for (let j = 0; j < xnew.length; j++)
+                  for (let k = 0; k < xnew.length; k++) varEta += xnew[j] * C.get(j, k) * xnew[k];
+              }
+              const seEta = Math.sqrt(Math.max(0, varEta));
+              const z = NumLib.normInv(0.975);
+              const sig = (e) => 1 / (1 + Math.exp(-e));
+              this.ui.predResult = {
+                kind: "logistic",
+                eta, seEta,
+                phat:    sig(eta),
+                ciLow:   sig(eta - z * seEta),
+                ciHigh:  sig(eta + z * seEta),
+                positive: this.model.spec.responseLevels && this.model.spec.responseLevels.positive,
+                threshold: this.model.threshold,
+                predictedClass: sig(eta) >= this.model.threshold
+                  ? (this.model.spec.responseLevels && this.model.spec.responseLevels.positive)
+                  : (this.model.spec.responseLevels && this.model.spec.responseLevels.negative),
+              };
+            } else {
+              const yhat = xnew.reduce((s, x, j) => s + x * this.model.beta[j], 0);
+              // SE_fit² = σ² · x'(X'X)⁻¹ x   ;   SE_pred² = σ²·(1 + x'(X'X)⁻¹ x)
+              let q = 0;
+              const C = this.model.XtXinv;
+              if (C) {
+                for (let j = 0; j < xnew.length; j++)
+                  for (let k = 0; k < xnew.length; k++) q += xnew[j] * C.get(j, k) * xnew[k];
+              }
+              const seFit  = Math.sqrt(Math.max(0, this.model.sigma2 * q));
+              const sePred = Math.sqrt(Math.max(0, this.model.sigma2 * (1 + q)));
+              const dof = this.model.spec.n - this.model.spec.p;
+              const tCrit = Stats._internal.tInverse(0.975, dof);
+              this.ui.predResult = {
+                kind: "ols",
+                yhat,
+                ciLow:  yhat - tCrit * seFit,  ciHigh: yhat + tCrit * seFit,
+                piLow:  yhat - tCrit * sePred, piHigh: yhat + tCrit * sePred,
+                response: this.model.spec.response,
+              };
+            }
+          } catch (e) {
+            this.ui.predError = e.message;
+          }
+        },
+
+        // Initialise predInputs to the column means / first level, called
+        // when the user activates the Predictions tab.
+        seedPredInputs() {
+          this.ui.predInputs = {};
+          if (!this.model) return;
+          for (const c of this.dataset.columns) {
+            if (!this.spec.predictors.includes(c.name)) continue;
+            if (c.type === "string") {
+              const vals = Array.from(new Set(this.dataset.rows.map((r) => r[c.name]).filter((v) => v != null && v !== "")));
+              this.ui.predInputs[c.name] = vals[0] || "";
+            } else {
+              const nums = this.dataset.rows.map((r) => r[c.name]).filter((v) => typeof v === "number" && !Number.isNaN(v));
+              const mean = nums.length > 0 ? nums.reduce((a, b) => a + b, 0) / nums.length : 0;
+              this.ui.predInputs[c.name] = Number(mean.toFixed(3));
+            }
+          }
+        },
+
+        // Unique levels for a string predictor — drives the Predictions
+        // tab's <select> options.
+        levelsFor(name) {
+          if (!this.dataset || !this.dataset.rows) return [];
+          return Array.from(new Set(
+            this.dataset.rows.map((r) => r[name]).filter((v) => v != null && v !== "")
+          )).sort();
         },
 
         /* =========================================================
