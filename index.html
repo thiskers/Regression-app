@@ -6,6 +6,408 @@
   <meta name="description" content="Browser-based statistical regression workbench. Load samples or your own CSV; run OLS, polynomial, or logistic regression with full diagnostics and a plain-English interpretation.">
   <title>Regression-app — Statistical Regression Workbench</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <style>
+    /* ===========================================================
+       Regression-app — custom CSS
+       Layered on top of Pico CSS. Pico provides typography, form
+       controls, and a default colour palette via [data-theme]. We
+       add: full-bleed grid layout, tab strip, severity pills,
+       Plotly container sizing, modal/overlay scaffolding, print CSS.
+       =========================================================== */
+
+    /* ---- Theme tokens (extend Pico's variables) ---- */
+    :root {
+      --app-sidebar-width: 320px;
+      --app-header-height: 3.5rem;
+      --app-footer-height: 2rem;
+      --app-gap: 1rem;
+      --app-radius: 0.4rem;
+      --app-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+      --sev-info-bg:     #e7f0fe;  --sev-info-fg:     #1d4ed8;
+      --sev-note-bg:     #f0f7ee;  --sev-note-fg:     #166534;
+      --sev-warn-bg:     #fff5e0;  --sev-warn-fg:     #92400e;
+      --sev-critical-bg: #fde8e8;  --sev-critical-fg: #991b1b;
+
+      --grid-line: var(--pico-muted-border-color, #e5e7eb);
+    }
+    [data-theme="dark"] {
+      --sev-info-bg:     #1e2a44;  --sev-info-fg:     #93c5fd;
+      --sev-note-bg:     #1f2e25;  --sev-note-fg:     #86efac;
+      --sev-warn-bg:     #3a2a14;  --sev-warn-fg:     #fbbf24;
+      --sev-critical-bg: #3a1d1d;  --sev-critical-fg: #fca5a5;
+    }
+
+    /* ---- Base layout: full-bleed grid ---- */
+    html, body { height: 100%; margin: 0; }
+    body { overflow: hidden; }            /* the app scrolls per-pane, not as a whole */
+    main.app-shell {
+      display: grid;
+      height: 100vh;
+      grid-template-columns: var(--app-sidebar-width) 1fr;
+      grid-template-rows: var(--app-header-height) 1fr var(--app-footer-height);
+      grid-template-areas:
+        "header  header"
+        "sidebar content"
+        "footer  footer";
+      max-width: none;
+      padding: 0;
+      gap: 0;
+    }
+
+    /* ---- Header ---- */
+    .app-header {
+      grid-area: header;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0 1rem;
+      border-bottom: 1px solid var(--grid-line);
+      background: var(--pico-card-background-color);
+    }
+    .app-header h1 {
+      font-size: 1.05rem;
+      margin: 0;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    .app-header .header-controls {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .app-header select,
+    .app-header button {
+      margin: 0;
+      padding: 0.35rem 0.6rem;
+      font-size: 0.85rem;
+      height: auto;
+      width: auto;
+    }
+
+    /* ---- Sidebar ---- */
+    .app-sidebar {
+      grid-area: sidebar;
+      overflow-y: auto;
+      border-right: 1px solid var(--grid-line);
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+      background: var(--pico-card-sectioning-background-color, transparent);
+    }
+    .sidebar-section h3 {
+      font-size: 0.75rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--pico-muted-color);
+      margin: 0 0 0.5rem 0;
+    }
+    .sidebar-section .field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+      margin-bottom: 0.5rem;
+    }
+    .sidebar-section label.inline {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.85rem;
+      margin: 0;
+      cursor: pointer;
+    }
+    .sidebar-section select,
+    .sidebar-section input[type="number"],
+    .sidebar-section input[type="text"] {
+      margin: 0;
+      padding: 0.3rem 0.5rem;
+      font-size: 0.85rem;
+      height: auto;
+    }
+    .var-list {
+      max-height: 14rem;
+      overflow-y: auto;
+      border: 1px solid var(--grid-line);
+      border-radius: var(--app-radius);
+      padding: 0.4rem;
+      font-size: 0.85rem;
+    }
+    .var-list .var-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 0.3rem;
+      align-items: center;
+      padding: 0.15rem 0.2rem;
+    }
+    .var-list .var-row + .var-row { border-top: 1px dashed var(--grid-line); }
+    .var-list .var-name { font-family: var(--app-mono); font-size: 0.78rem; }
+    .var-list .var-meta { color: var(--pico-muted-color); font-size: 0.7rem; }
+
+    .fit-button {
+      width: 100%;
+      margin: 0;
+      padding: 0.6rem;
+      font-weight: 600;
+    }
+    .fit-button.dirty { box-shadow: 0 0 0 2px var(--sev-warn-fg); }
+
+    /* ---- Main content area + tabs ---- */
+    .app-content {
+      grid-area: content;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .tab-strip {
+      display: flex;
+      gap: 0.25rem;
+      padding: 0.4rem 0.75rem 0;
+      border-bottom: 1px solid var(--grid-line);
+      overflow-x: auto;
+      flex-shrink: 0;
+    }
+    .tab-strip button {
+      margin: 0;
+      padding: 0.4rem 0.85rem;
+      font-size: 0.85rem;
+      background: transparent;
+      color: var(--pico-color);
+      border: 1px solid transparent;
+      border-bottom: none;
+      border-top-left-radius: var(--app-radius);
+      border-top-right-radius: var(--app-radius);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .tab-strip button:hover { background: var(--pico-card-sectioning-background-color); }
+    .tab-strip button.active {
+      background: var(--pico-background-color);
+      border-color: var(--grid-line);
+      border-bottom: 1px solid var(--pico-background-color);
+      margin-bottom: -1px;
+      font-weight: 600;
+    }
+    .tab-panel {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1rem 1.25rem;
+    }
+
+    /* ---- Cards / panels inside tabs ---- */
+    .panel {
+      background: var(--pico-card-background-color);
+      border: 1px solid var(--grid-line);
+      border-radius: var(--app-radius);
+      padding: 0.85rem 1rem;
+      margin-bottom: 1rem;
+    }
+    .panel-title {
+      font-size: 0.75rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--pico-muted-color);
+      margin: 0 0 0.5rem 0;
+    }
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+      gap: 0.75rem;
+    }
+    .stat { display: flex; flex-direction: column; gap: 0.1rem; }
+    .stat .stat-label { font-size: 0.7rem; color: var(--pico-muted-color); text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat .stat-value { font-family: var(--app-mono); font-size: 1.05rem; font-weight: 600; }
+
+    /* ---- Coefficient table ---- */
+    table.coef-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--app-mono);
+      font-size: 0.82rem;
+    }
+    table.coef-table th,
+    table.coef-table td {
+      padding: 0.35rem 0.55rem;
+      border-bottom: 1px solid var(--grid-line);
+      text-align: right;
+      white-space: nowrap;
+    }
+    table.coef-table th {
+      position: sticky;
+      top: 0;
+      background: var(--pico-background-color);
+      font-weight: 600;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--pico-muted-color);
+      cursor: pointer;
+    }
+    table.coef-table td.name,
+    table.coef-table th.name { text-align: left; font-family: var(--pico-font-family); font-weight: 500; }
+    table.coef-table tr.sig td { background: rgba(34, 197, 94, 0.04); }
+    table.coef-table .stars { color: var(--sev-note-fg); letter-spacing: 0.02em; }
+
+    /* ---- Severity pills ---- */
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.15rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      line-height: 1.4;
+    }
+    .pill.info     { background: var(--sev-info-bg);     color: var(--sev-info-fg); }
+    .pill.note     { background: var(--sev-note-bg);     color: var(--sev-note-fg); }
+    .pill.warn     { background: var(--sev-warn-bg);     color: var(--sev-warn-fg); }
+    .pill.critical { background: var(--sev-critical-bg); color: var(--sev-critical-fg); }
+    .pill .dot { width: 0.4rem; height: 0.4rem; border-radius: 50%; background: currentColor; }
+
+    /* ---- Plotly containers ---- */
+    .plot { width: 100%; min-height: 340px; }
+    .plot-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+      gap: 1rem;
+    }
+    .plot-thumb {
+      cursor: pointer;
+      border: 1px solid var(--grid-line);
+      border-radius: var(--app-radius);
+      padding: 0.4rem;
+      font-size: 0.75rem;
+    }
+    .plot-thumb.active { border-color: var(--pico-primary); box-shadow: inset 0 0 0 1px var(--pico-primary); }
+
+    /* ---- Footer ---- */
+    .app-footer {
+      grid-area: footer;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 0 1rem;
+      border-top: 1px solid var(--grid-line);
+      font-size: 0.75rem;
+      color: var(--pico-muted-color);
+      background: var(--pico-card-background-color);
+    }
+    .app-footer .spacer { flex: 1; }
+
+    /* ---- Modal scaffolding (used by upload/paste/about) ---- */
+    .modal-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(15, 23, 42, 0.55);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 50;
+    }
+    .modal-dialog {
+      background: var(--pico-background-color);
+      border-radius: var(--app-radius);
+      padding: 1.25rem 1.5rem;
+      max-width: 32rem;
+      width: 90vw;
+      max-height: 80vh;
+      overflow-y: auto;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+    }
+
+    /* ---- Tutorial spotlight overlay ----
+       The cutout is the highlighted element with a giant box-shadow,
+       so we don't need an SVG mask. The overlay <div> is just the
+       interactive popover container.                                */
+    .tutorial-overlay {
+      position: fixed; inset: 0;
+      pointer-events: none;
+      z-index: 40;
+    }
+    .tutorial-target {
+      position: relative;
+      z-index: 41;
+      box-shadow:
+        0 0 0 4px var(--pico-primary, #2563eb),
+        0 0 0 9999px rgba(15, 23, 42, 0.55);
+      border-radius: var(--app-radius);
+      transition: box-shadow 0.18s ease-out;
+    }
+    .tutorial-popover {
+      position: absolute;
+      pointer-events: auto;
+      background: var(--pico-background-color);
+      border: 1px solid var(--grid-line);
+      border-radius: var(--app-radius);
+      padding: 0.9rem 1rem;
+      width: 22rem;
+      max-width: 90vw;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+      font-size: 0.9rem;
+    }
+    .tutorial-popover .controls {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+    .tutorial-popover .controls .spacer { flex: 1; }
+    .tutorial-popover button { margin: 0; padding: 0.3rem 0.7rem; font-size: 0.8rem; }
+
+    /* ---- Toast ---- */
+    .toast {
+      position: fixed;
+      bottom: 1.5rem; right: 1.5rem;
+      z-index: 60;
+      background: var(--pico-card-background-color);
+      border: 1px solid var(--grid-line);
+      border-left: 4px solid var(--pico-primary);
+      padding: 0.6rem 0.9rem;
+      border-radius: var(--app-radius);
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+      font-size: 0.85rem;
+      max-width: 24rem;
+    }
+    .toast.error { border-left-color: var(--sev-critical-fg); }
+
+    /* ---- Mobile / narrow viewport ---- */
+    @media (max-width: 900px) {
+      main.app-shell {
+        grid-template-columns: 1fr;
+        grid-template-rows: var(--app-header-height) auto 1fr var(--app-footer-height);
+        grid-template-areas:
+          "header"
+          "sidebar"
+          "content"
+          "footer";
+      }
+      .app-sidebar {
+        max-height: 40vh;
+        border-right: none;
+        border-bottom: 1px solid var(--grid-line);
+      }
+    }
+
+    /* ---- Print CSS ---- */
+    @media print {
+      body { overflow: visible; }
+      .app-header, .app-sidebar, .app-footer, .tab-strip,
+      .tutorial-overlay, .modal-backdrop, .toast { display: none !important; }
+      main.app-shell {
+        display: block;
+        height: auto;
+      }
+      .app-content { display: block; height: auto; overflow: visible; }
+      .tab-panel {
+        display: block !important;
+        page-break-after: always;
+        overflow: visible;
+        padding: 0;
+      }
+      .panel { break-inside: avoid; box-shadow: none; }
+      .plot { break-inside: avoid; }
+      @page { size: Letter; margin: 0.75in; }
+    }
+  </style>
 </head>
 <body>
   <main class="container" x-data="app()" x-init="init()">
