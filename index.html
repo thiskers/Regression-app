@@ -446,11 +446,29 @@
                 @click="startTutorial()"
                 title="Run the in-app tutorial">Tutorial</button>
 
-        <button type="button"
-                class="secondary"
-                :disabled="!model"
-                @click="ui.exportOpen = !ui.exportOpen"
-                title="Export results">Export ▾</button>
+        <div style="position: relative">
+          <button type="button"
+                  class="secondary"
+                  :disabled="!model"
+                  @click="ui.exportOpen = !ui.exportOpen"
+                  @click.outside="ui.exportOpen = false"
+                  title="Export results">Export ▾</button>
+          <div x-show="ui.exportOpen" x-cloak
+               style="position: absolute; right: 0; top: calc(100% + 4px); z-index: 30;
+                      background: var(--pico-background-color); border: 1px solid var(--grid-line);
+                      border-radius: var(--app-radius); box-shadow: 0 6px 16px rgba(0,0,0,0.18);
+                      min-width: 14rem; padding: 0.4rem 0; font-size: 0.85rem">
+            <button class="secondary" style="display: block; width: 100%; margin: 0; padding: 0.45rem 0.9rem; text-align: left; border: none; background: transparent; border-radius: 0; font-size: inherit"
+                    @click="exportJSON(); ui.exportOpen = false">JSON state dump</button>
+            <button class="secondary" style="display: block; width: 100%; margin: 0; padding: 0.45rem 0.9rem; text-align: left; border: none; background: transparent; border-radius: 0; font-size: inherit"
+                    @click="exportMarkdown(); ui.exportOpen = false">Markdown report</button>
+            <button class="secondary" style="display: block; width: 100%; margin: 0; padding: 0.45rem 0.9rem; text-align: left; border: none; background: transparent; border-radius: 0; font-size: inherit"
+                    @click="print(); ui.exportOpen = false">Print / PDF</button>
+            <p style="margin: 0.4rem 0.9rem 0 0.9rem; font-size: 0.7rem; color: var(--pico-muted-color)">
+              JSON: full payload.  Markdown: narrative + coef table.  Print: OS PDF dialog.
+            </p>
+          </div>
+        </div>
 
         <button type="button"
                 class="secondary"
@@ -3872,12 +3890,258 @@
       return { RULES, run };
     })();
 
+    /* ===== 7. Report =====
+       Three exports: JSON state dump, Markdown narrative, and PDF via
+       window.print() with a print-friendly stylesheet (already in CSS).
+
+       We deliberately skip jsPDF / pdfmake — they double the bundle size
+       and the OS print dialog produces better-looking PDFs anyway. */
     const Report = (function () {
-      return {
-        json:     _NI("Report.json",     15),
-        markdown: _NI("Report.markdown", 15),
-        print:    _NI("Report.print",    15),
-      };
+
+      const APP_VERSION = "1.0.0";
+
+      function _stamp(model) {
+        return {
+          appVersion: APP_VERSION,
+          generatedAt: new Date().toISOString(),
+          libraries: {
+            mlMatrix: (window.mlMatrix && window.mlMatrix.version) || "unknown",
+            plotly:    (window.Plotly && (window.Plotly.version || "loaded")) || "missing",
+            alpine:    (window.Alpine && (window.Alpine.version || "loaded")) || "missing",
+            papaparse: (window.Papa && (window.Papa.RECORD_SEP ? "loaded" : "loaded")) || "missing",
+          },
+        };
+      }
+
+      // Trigger a browser download of (filename, blob).
+      function _download(filename, blob) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        // Revoke after a tick so the download actually starts in Safari.
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+      }
+
+      // JSON serialisation with custom replacer for ml-matrix instances.
+      // Stores any Matrix as { __matrix__: [[...rows]], rows: M, cols: N }.
+      function _jsonReplacer(key, val) {
+        if (val && typeof val === "object" && val.constructor && val.constructor.name === "Matrix" && typeof val.to2DArray === "function") {
+          const arr = val.to2DArray();
+          return { __matrix__: arr, rows: arr.length, cols: arr[0] ? arr[0].length : 0 };
+        }
+        return val;
+      }
+
+      function json(model) {
+        if (!model) throw new Error("No model to export. Fit one first.");
+        const payload = {
+          ..._stamp(model),
+          model: {
+            family:  model.family,
+            spec:    model.spec,
+            beta:    model.beta,
+            se:      model.se,
+            t:       model.t,
+            p:       model.p,
+            ci:      model.ci,
+            betaStd: model.betaStd,
+            // Goodness-of-fit
+            r2: model.r2, adjR2: model.adjR2,
+            rss: model.rss, tss: model.tss, sigma2: model.sigma2, rmse: model.rmse,
+            aic: model.aic, bic: model.bic, logLik: model.logLik,
+            fStat: model.fStat, fDf1: model.fDf1, fDf2: model.fDf2, fPval: model.fPval,
+            // Logistic-only (NaN-safe; serialise as nulls)
+            deviance: model.deviance, nullDeviance: model.nullDeviance,
+            mcFaddenR2: model.mcFaddenR2, lrChi2: model.lrChi2, lrDf: model.lrDf, lrPval: model.lrPval,
+            converged: model.converged, iterations: model.iterations, separation: model.separation,
+            confusion: model.confusion, threshold: model.threshold,
+            auc: model.auc,
+            // Diagnostics (excluding plot intermediates)
+            diagnostics: model.diagnostics,
+            // Predictions / interpretation
+            interp: model.interp,
+            // Reproducibility
+            warnings: model.warnings,
+            dropped:  model.dropped,
+            activeSEKind: model.activeSEKind,
+            robustSE: model.robustSE,
+          },
+          // Predictions tab can re-encode new rows from this:
+          stringLevels: model.stringLevels,
+        };
+        const text = JSON.stringify(payload, _jsonReplacer, 2);
+        const filename = `regression-${(model.spec.response || "model").replace(/[^A-Za-z0-9]/g, "_")}-${Date.now()}.json`;
+        _download(filename, new Blob([text], { type: "application/json" }));
+        return text;
+      }
+
+      // Format a number for Markdown tables.
+      function _f(x, d = 4) {
+        if (x == null || Number.isNaN(x)) return "—";
+        if (!Number.isFinite(x)) return x > 0 ? "Inf" : "−Inf";
+        const ax = Math.abs(x);
+        if (ax !== 0 && (ax < 1e-3 || ax >= 1e6)) return x.toExponential(d - 1);
+        return x.toFixed(d);
+      }
+      function _fp(p) {
+        if (p == null || Number.isNaN(p)) return "—";
+        if (p < 1e-4) return "<1e-4";
+        if (p < 1e-3) return "<0.001";
+        return p.toFixed(4);
+      }
+      function _stripHtml(s) {
+        return String(s).replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+      }
+
+      function markdown(model) {
+        if (!model) throw new Error("No model to export. Fit one first.");
+
+        const lines = [];
+        lines.push(`# Regression analysis: \`${model.spec.response}\``);
+        lines.push("");
+        lines.push(`*Generated by Regression-app ${APP_VERSION} on ${new Date().toLocaleString()}*`);
+        lines.push("");
+
+        // Model spec
+        const slopeNames = model.spec.predictorNames.filter((n) => n !== "(Intercept)");
+        lines.push(`**Model:** \`${model.spec.response}\` ~ ${slopeNames.map((n) => "`" + n + "`").join(" + ")}`);
+        lines.push("");
+        lines.push(`- Family: **${model.family}**` + (model.spec.hasIntercept ? "" : " (no intercept)"));
+        lines.push(`- Observations: **${model.spec.n}**` + (model.dropped ? `  (${model.dropped} dropped)` : ""));
+        lines.push(`- Predictors: **${model.spec.p}**` + (model.activeSEKind === "HC3" ? "  (HC3 robust SE)" : ""));
+        lines.push("");
+
+        // Headline + summary stats
+        if (model.interp && model.interp.headline) {
+          lines.push("## Headline");
+          lines.push("");
+          lines.push(`> **[${model.interp.headline.severity}]** ${_stripHtml(model.interp.headline.text)}`);
+          lines.push("");
+        }
+
+        lines.push("## Summary");
+        lines.push("");
+        if (model.family === "logistic") {
+          lines.push(`| metric | value |`);
+          lines.push(`|---|---|`);
+          lines.push(`| Pseudo-R² (McFadden) | ${_f(model.mcFaddenR2)} |`);
+          lines.push(`| AUC                  | ${_f(model.auc)} |`);
+          lines.push(`| Accuracy             | ${_f(model.confusion ? model.confusion.accuracy : NaN)} |`);
+          lines.push(`| LR χ² (df ${model.lrDf})       | ${_f(model.lrChi2, 2)}, p = ${_fp(model.lrPval)} |`);
+          lines.push(`| Deviance / null      | ${_f(model.deviance, 1)} / ${_f(model.nullDeviance, 1)} |`);
+          lines.push(`| AIC / BIC            | ${_f(model.aic, 1)} / ${_f(model.bic, 1)} |`);
+          lines.push(`| IRLS convergence     | ${model.converged ? `✓ in ${model.iterations} iter` : "✗ NOT converged"} |`);
+          if (model.confusion) lines.push(`| TP / FP / TN / FN    | ${model.confusion.tp} / ${model.confusion.fp} / ${model.confusion.tn} / ${model.confusion.fn} |`);
+        } else {
+          lines.push(`| metric | value |`);
+          lines.push(`|---|---|`);
+          lines.push(`| R² / adj R²       | ${_f(model.r2)} / ${_f(model.adjR2)} |`);
+          lines.push(`| RMSE              | ${_f(model.rmse)} |`);
+          lines.push(`| F-statistic       | ${_f(model.fStat, 2)} on ${model.fDf1} and ${model.fDf2} df, p = ${_fp(model.fPval)} |`);
+          lines.push(`| AIC / BIC         | ${_f(model.aic, 1)} / ${_f(model.bic, 1)} |`);
+          lines.push(`| log-likelihood    | ${_f(model.logLik, 2)} |`);
+        }
+        lines.push("");
+
+        // Coefficients
+        lines.push("## Coefficients");
+        lines.push("");
+        const tHeader = model.family === "logistic" ? "z" : "t";
+        lines.push(`| Predictor | Estimate | Std. err | ${tHeader} | p-value | 95 % CI | Std β | VIF |`);
+        lines.push(`|---|---:|---:|---:|---:|---:|---:|---:|`);
+        for (let i = 0; i < model.spec.predictorNames.length; i++) {
+          const ci = model.ci[i];
+          const std = model.betaStd[i];
+          const vif = model.diagnostics && model.diagnostics.vif ? model.diagnostics.vif[i] : null;
+          lines.push(
+            `| \`${model.spec.predictorNames[i]}\`` +
+            ` | ${_f(model.beta[i], 5)}` +
+            ` | ${_f(model.se[i], 5)}` +
+            ` | ${_f(model.t[i], 3)}` +
+            ` | ${_fp(model.p[i])}` +
+            ` | [${_f(ci[0], 4)}, ${_f(ci[1], 4)}]` +
+            ` | ${std == null ? "—" : _f(std, 3)}` +
+            ` | ${vif == null ? "—" : _f(vif, 2)} |`
+          );
+        }
+        lines.push("");
+
+        // Diagnostics (OLS only — logistic short-circuits these)
+        if (model.family !== "logistic" && model.diagnostics && Number.isFinite(model.diagnostics.durbinWatson)) {
+          const d = model.diagnostics;
+          lines.push("## Diagnostics");
+          lines.push("");
+          lines.push(`| Test | Statistic | p-value |`);
+          lines.push(`|---|---:|---:|`);
+          lines.push(`| Durbin-Watson           | ${_f(d.durbinWatson)} | — |`);
+          lines.push(`| Breusch-Pagan (Koenker) | ${_f(d.bp.stat, 3)}  (df ${d.bp.df}) | ${_fp(d.bp.p)} |`);
+          lines.push(`| Jarque-Bera             | ${_f(d.jb.stat, 3)}  (df 2)         | ${_fp(d.jb.p)} |`);
+          lines.push(`| Shapiro-Wilk            | W = ${_f(d.sw.stat, 4)}             | ${_fp(d.sw.p)} |`);
+          lines.push("");
+          if (d.influentialIdx && d.influentialIdx.length > 0) {
+            lines.push(`**Influential rows (Cook's > ${_f(d.cookThreshold, 4)}):**  ${d.influentialIdx.slice(0, 12).map((i) => i + 1).join(", ")}${d.influentialIdx.length > 12 ? ", …" : ""}`);
+            lines.push("");
+          }
+        }
+
+        // Interpretation sections
+        if (model.interp) {
+          for (const [k, label] of [["overall","Overall fit"], ["predictors","Predictor effects"], ["assumptions","Assumption issues"], ["recommend","Recommendations"]]) {
+            const items = model.interp[k];
+            if (!items || items.length === 0) continue;
+            lines.push(`## ${label}`);
+            lines.push("");
+            for (const item of items) {
+              lines.push(`- **[${item.severity}]** ${_stripHtml(item.text)}`);
+            }
+            lines.push("");
+          }
+        }
+
+        if (model.warnings && model.warnings.length > 0) {
+          lines.push("## Warnings");
+          lines.push("");
+          for (const w of model.warnings) lines.push(`- ${w}`);
+          lines.push("");
+        }
+
+        lines.push("---");
+        lines.push("");
+        lines.push(`*Regression-app v${APP_VERSION}.  ml-matrix ${(window.mlMatrix && window.mlMatrix.version) || "?"} · Plotly ${(window.Plotly && window.Plotly.version) || "?"}.*`);
+
+        const text = lines.join("\n");
+        const filename = `regression-${(model.spec.response || "model").replace(/[^A-Za-z0-9]/g, "_")}-${Date.now()}.md`;
+        _download(filename, new Blob([text], { type: "text/markdown" }));
+        return text;
+      }
+
+      // Print: rely on the print CSS already in the head (Step 2).
+      // Plotly's WebGL canvases generally print fine in modern browsers;
+      // we just force the Plots tab visible briefly so all figures render
+      // before the print dialog opens.
+      function print(model) {
+        if (!model) throw new Error("No model to print. Fit one first.");
+        // Make every tab visible so a single linear print captures the
+        // whole report. The print CSS hides chrome and page-breaks tabs.
+        const panels = document.querySelectorAll(".tab-panel");
+        const original = [];
+        panels.forEach((p) => { original.push(p.style.display); p.style.display = "block"; });
+        // Trigger Plot rendering for any tab that hasn't been visited yet.
+        try { if (window.Plotly && model) window.requestAnimationFrame(() => Plots.renderAll(model)); } catch (e) {}
+        // Defer print so the layout settles first.
+        setTimeout(() => {
+          try { window.print(); }
+          finally {
+            panels.forEach((p, i) => { p.style.display = original[i]; });
+          }
+        }, 250);
+      }
+
+      return { json, markdown, print, _stripHtml, _stamp };
     })();
 
     /* ===== 8. Tutorial =====
