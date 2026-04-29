@@ -988,10 +988,86 @@
 
       <!-- Tab: Interpretation -->
       <div class="tab-panel" x-show="ui.activeTab === 'interpretation'">
-        <article class="panel">
+        <article class="panel" x-show="!model">
           <h2 class="panel-title">Interpretation</h2>
-          <p style="color: var(--pico-muted-color)">Plain-English auto-interpretation — Step 12.</p>
+          <p style="color: var(--pico-muted-color)">Fit a model first.</p>
         </article>
+
+        <!-- Headline + copy controls -->
+        <article class="panel" x-show="model && model.interp && model.interp.headline">
+          <div style="display: flex; align-items: flex-start; gap: 0.75rem">
+            <span class="pill"
+                  :class="model && model.interp && model.interp.headline ? model.interp.headline.severity : 'info'"
+                  style="flex-shrink: 0; margin-top: 0.15rem">
+              <span class="dot"></span>HEADLINE
+            </span>
+            <p style="margin: 0; font-size: 0.95rem; line-height: 1.5; flex: 1"
+               x-html="model && model.interp && model.interp.headline ? model.interp.headline.text : ''"></p>
+            <button class="secondary"
+                    style="margin: 0; padding: 0.3rem 0.6rem; font-size: 0.78rem; flex-shrink: 0"
+                    @click="copyInterpretation()"
+                    title="Copy the full interpretation as plain text">
+              Copy
+            </button>
+          </div>
+        </article>
+
+        <!-- Section: overall fit -->
+        <article class="panel" x-show="model && model.interp && model.interp.overall.length > 0">
+          <h2 class="panel-title">Overall fit</h2>
+          <template x-for="(item, i) in (model && model.interp ? model.interp.overall : [])" :key="i">
+            <div style="display: flex; gap: 0.6rem; align-items: flex-start; margin-bottom: 0.55rem">
+              <span class="pill" :class="item.severity" style="flex-shrink: 0; margin-top: 0.15rem">
+                <span class="dot"></span><span x-text="item.severity"></span>
+              </span>
+              <p style="margin: 0; font-size: 0.9rem; line-height: 1.5; flex: 1" x-html="item.text"></p>
+            </div>
+          </template>
+        </article>
+
+        <!-- Section: predictor effects -->
+        <article class="panel" x-show="model && model.interp && model.interp.predictors.length > 0">
+          <h2 class="panel-title">Predictor effects</h2>
+          <template x-for="(item, i) in (model && model.interp ? model.interp.predictors : [])" :key="i">
+            <div style="display: flex; gap: 0.6rem; align-items: flex-start; margin-bottom: 0.55rem">
+              <span class="pill" :class="item.severity" style="flex-shrink: 0; margin-top: 0.15rem">
+                <span class="dot"></span><span x-text="item.severity"></span>
+              </span>
+              <p style="margin: 0; font-size: 0.9rem; line-height: 1.5; flex: 1" x-html="item.text"></p>
+            </div>
+          </template>
+        </article>
+
+        <!-- Section: assumption issues -->
+        <article class="panel" x-show="model && model.interp && model.interp.assumptions.length > 0">
+          <h2 class="panel-title">Assumption issues</h2>
+          <template x-for="(item, i) in (model && model.interp ? model.interp.assumptions : [])" :key="i">
+            <div style="display: flex; gap: 0.6rem; align-items: flex-start; margin-bottom: 0.55rem">
+              <span class="pill" :class="item.severity" style="flex-shrink: 0; margin-top: 0.15rem">
+                <span class="dot"></span><span x-text="item.severity"></span>
+              </span>
+              <p style="margin: 0; font-size: 0.9rem; line-height: 1.5; flex: 1" x-html="item.text"></p>
+            </div>
+          </template>
+        </article>
+
+        <!-- Section: recommendations -->
+        <article class="panel" x-show="model && model.interp && model.interp.recommend.length > 0">
+          <h2 class="panel-title">Recommendations</h2>
+          <template x-for="(item, i) in (model && model.interp ? model.interp.recommend : [])" :key="i">
+            <div style="display: flex; gap: 0.6rem; align-items: flex-start; margin-bottom: 0.55rem">
+              <span class="pill" :class="item.severity" style="flex-shrink: 0; margin-top: 0.15rem">
+                <span class="dot"></span><span x-text="item.severity"></span>
+              </span>
+              <p style="margin: 0; font-size: 0.9rem; line-height: 1.5; flex: 1" x-html="item.text"></p>
+            </div>
+          </template>
+        </article>
+
+        <p x-show="model && model.interp && model.interp.overall.length === 0 && model.interp.predictors.length === 0 && model.interp.assumptions.length === 0"
+           style="color: var(--pico-muted-color); font-size: 0.85rem; padding: 0 1rem">
+          No rules fired — usually a sign of a clean fit. Cross-check with the Diagnostics tab.
+        </p>
       </div>
 
       <!-- Tab: About -->
@@ -3637,6 +3713,31 @@
           for (const c of m.diagnostics.cooks) if (Number.isFinite(c) && c > mx) mx = c;
           return mx;
         },
+        // Render the interpretation to plain text (HTML stripped) and
+        // copy to clipboard. Used by the Interpretation tab Copy button.
+        copyInterpretation() {
+          const m = this.model;
+          if (!m || !m.interp) return;
+          const strip = (s) => s.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+          const lines = [];
+          if (m.interp.headline) lines.push("HEADLINE: " + strip(m.interp.headline.text));
+          for (const [k, label] of [["overall","OVERALL FIT"], ["predictors","PREDICTOR EFFECTS"], ["assumptions","ASSUMPTION ISSUES"], ["recommend","RECOMMENDATIONS"]]) {
+            if (m.interp[k].length === 0) continue;
+            lines.push("\n" + label);
+            for (const item of m.interp[k]) lines.push("  [" + item.severity + "] " + strip(item.text));
+          }
+          const text = lines.join("\n");
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(
+              () => { this.bootStatus = "Interpretation copied to clipboard."; },
+              () => { this.bootStatus = "Clipboard copy failed."; }
+            );
+          } else {
+            // Fallback: open in a textarea-prompt for manual copy.
+            window.prompt("Copy the interpretation:", text);
+          }
+        },
+
         // Indices flagged as influential, sorted by Cook's descending.
         topInfluential(m) {
           if (!m || !m.diagnostics) return [];
