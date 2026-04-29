@@ -2316,7 +2316,18 @@
         const cookThreshold     = 4 / n;
         const leverageThreshold = (2 * p) / n;
         const influentialIdx    = [];
-        for (let i = 0; i < n; i++) if (cooks[i] > cookThreshold) influentialIdx.push(i);
+        for (let i = 0; i < n; i++) {
+          // Flag a row as influential if EITHER its Cook's distance
+          // exceeds 4/n OR its leverage exceeds 2p/n. The leverage
+          // branch catches perfect-leverage rows (h_ii = 1) where
+          // Cook's is NaN by construction — Anscombe set 4's row 8
+          // is the canonical case.
+          const c = cooks[i], h = lev[i];
+          if ((Number.isFinite(c) && c > cookThreshold) ||
+              (Number.isFinite(h) && h > leverageThreshold)) {
+            influentialIdx.push(i);
+          }
+        }
 
         let hc3 = null;
         if (model.robustSE === true) hc3 = hc3SE(model, lev, XtXinv);
@@ -2870,15 +2881,347 @@
       };
     })();
 
+    /* ===== 6. Interpret =====
+       Rule-based plain-English interpretation of a fitted model.
+
+       Each rule is a small object {id, section, severity, applies(m),
+       render(m)}. Interpret.run(m) walks RULES, collects everything
+       that fires, groups by section, sorts by severity, and composes
+       a one-line headline. The output is rendered by the Interpretation
+       tab (Step 12b).
+
+       Sections:    overall · predictors · assumptions · recommend
+       Severities:  critical · warn · note · info   (matches CSS pills) */
     const Interpret = (function () {
-      // run() returns an empty bundle pre-Step-12 so the Interpretation
-      // tab renders cleanly (no rules fire). The full RULES list lands then.
-      return {
-        RULES: [],
-        run(/* model */) {
-          return { headline: "", overall: [], predictors: [], assumptions: [], recommend: [] };
-        },
+
+      /* ---- tiny formatters used inside rule strings ---- */
+      const _fmt = (x, d = 4) => {
+        if (x == null || Number.isNaN(x)) return "—";
+        if (!Number.isFinite(x)) return x > 0 ? "∞" : "−∞";
+        const ax = Math.abs(x);
+        if (ax !== 0 && (ax < 1e-3 || ax >= 1e6)) return x.toExponential(d - 1);
+        return x.toFixed(d);
       };
+      const _fmtP = (p) => {
+        if (p == null || Number.isNaN(p)) return "—";
+        if (p < 1e-4) return "&lt; 1e-4";
+        if (p < 1e-3) return "&lt; 0.001";
+        return p.toFixed(4);
+      };
+      const _pct = (x, d = 1) => (x * 100).toFixed(d) + "%";
+      const _slopeIdx = (m) => {
+        const out = [];
+        const start = m.spec.hasIntercept ? 1 : 0;
+        for (let i = start; i < m.spec.predictorNames.length; i++) out.push(i);
+        return out;
+      };
+
+      /* ---- Curvature trigger for the Anscombe-pattern rule.
+             Equivalent in spirit to Ramsey's RESET test, but lighter:
+             fits residuals ~ 1 + fitted + fitted² and reports the
+             t-statistic and p-value of the quadratic coefficient.
+             Significant means there's real curvature the linear fit
+             missed. Gated to n ≥ 12 so we don't claim curvature with
+             too little data to test it. Returns null when the
+             auxiliary fit is not estimable. */
+      function _curvature(m) {
+        if (!m || !m.fitted || m.fitted.length < 10) return null;
+        // Skip degenerate cases where fitted has too few distinct values
+        // for a quadratic in fitted to be identifiable. Anscombe set 4 is
+        // the canonical example — its single perfect-leverage point yields
+        // only two distinct fitted values, making the auxiliary X'X
+        // singular up to round-off; the resulting t-statistic explodes
+        // and isn't a real curvature signal.
+        const distinct = new Set(m.fitted.map((f) => f.toFixed(8))).size;
+        if (distinct < 4) return null;
+        const M   = window.mlMatrix.Matrix;
+        const QR  = window.mlMatrix.QrDecomposition;
+        const inv = window.mlMatrix.inverse;
+        const n   = m.fitted.length;
+        const X   = m.fitted.map((f) => [1, f, f * f]);
+        const y   = m.residuals;
+        try {
+          const Xm = new M(X);
+          const beta = new QR(Xm).solve(M.columnVector(y)).to1DArray();
+          const fit  = Xm.mmul(M.columnVector(beta)).to1DArray();
+          const rss  = y.reduce((s, yi, i) => s + (yi - fit[i]) ** 2, 0);
+          const dof  = n - 3;
+          if (dof <= 0) return null;
+          const sigma2 = rss / dof;
+          const XtXinv = inv(Xm.transpose().mmul(Xm));
+          const seQ = Math.sqrt(XtXinv.get(2, 2) * sigma2);
+          if (!(seQ > 0)) return null;
+          const tQ  = beta[2] / seQ;
+          const pQ  = NumLib.tPvalue2(tQ, dof);
+          return { coef: beta[2], t: tQ, p: pQ };
+        } catch { return null; }
+      }
+
+      /* =========================================================
+                                    RULES
+         ========================================================= */
+      const RULES = [
+
+        /* ---- Section: overall fit ---- */
+        {
+          id: "r2_overfit", section: "overall", severity: "warn",
+          applies: (m) => m.r2 > 0.999 && (m.spec.predictorNames.length - (m.spec.hasIntercept ? 1 : 0)) >= 4 && m.spec.n < 30,
+          render:  (m) => `Suspiciously high R² of ${_pct(m.r2)} with ${m.spec.predictorNames.length - (m.spec.hasIntercept ? 1 : 0)} predictors and only ${m.spec.n} observations is a red flag for <strong>overfitting</strong>. Cross-validate or hold out a test set before trusting the estimates.`,
+        },
+        {
+          id: "r2_high", section: "overall", severity: "info",
+          applies: (m) => m.family !== "logistic" && m.r2 >= 0.85 && m.r2 <= 0.999,
+          render:  (m) => `The model explains <strong>${_pct(m.r2)}</strong> of the variation in <code>${m.spec.response}</code> — a strong fit. Confirm it is not driven by a few influential points (see Influence diagnostics) or by overfitting (compare adjusted R² = ${_pct(m.adjR2)}).`,
+        },
+        {
+          id: "r2_moderate", section: "overall", severity: "info",
+          applies: (m) => m.family !== "logistic" && m.r2 >= 0.5 && m.r2 < 0.85,
+          render:  (m) => `The model explains <strong>${_pct(m.r2)}</strong> of the variation in <code>${m.spec.response}</code> (adjusted R² = ${_pct(m.adjR2)}) — a moderate fit.`,
+        },
+        {
+          id: "r2_low", section: "overall", severity: "note",
+          applies: (m) => m.family !== "logistic" && m.r2 < 0.2 && Number.isFinite(m.r2),
+          render:  (m) => `The model explains only ${_pct(m.r2)} of the variation in <code>${m.spec.response}</code>. Most variation is unexplained — consider additional predictors, transformations, or a non-linear model.`,
+        },
+        {
+          id: "f_test_failed", section: "overall", severity: "critical",
+          applies: (m) => m.family !== "logistic" && Number.isFinite(m.fPval) && m.fPval >= 0.05,
+          render:  (m) => `The overall F-test is <strong>not significant</strong> (F = ${_fmt(m.fStat, 3)} on ${m.fDf1} and ${m.fDf2} df, p = ${_fmtP(m.fPval)}). The model as a whole does not explain <code>${m.spec.response}</code> better than the mean. Coefficient-level p-values, even if individually small, should not be acted on.`,
+        },
+        {
+          id: "f_test_significant", section: "overall", severity: "info",
+          applies: (m) => m.family !== "logistic" && Number.isFinite(m.fPval) && m.fPval < 0.05,
+          render:  (m) => `Overall F-test is significant (F = ${_fmt(m.fStat, 3)} on ${m.fDf1} and ${m.fDf2} df, p = ${_fmtP(m.fPval)}) — the model explains <code>${m.spec.response}</code> better than the mean alone.`,
+        },
+
+        /* ---- Section: predictor effects (one-rule-many-statements) ---- */
+        {
+          id: "predictor_effects", section: "predictors", severity: "info",
+          applies: (m) => _slopeIdx(m).length > 0,
+          render:  (m) => {
+            const out = [];
+            for (const i of _slopeIdx(m)) {
+              const name = m.spec.predictorNames[i];
+              const b    = m.beta[i];
+              const ci   = m.ci[i];
+              const p    = m.p[i];
+              const dir  = b >= 0 ? "positive" : "negative";
+              if (p < 0.05) {
+                out.push({
+                  severity: "info",
+                  text: `<code>${name}</code> shows a statistically significant <strong>${dir}</strong> association with <code>${m.spec.response}</code> (β = ${_fmt(b, 4)}, 95 % CI [${_fmt(ci[0], 4)}, ${_fmt(ci[1], 4)}], p = ${_fmtP(p)}). Holding other predictors constant, a one-unit increase in <code>${name}</code> is associated with ${b >= 0 ? "an increase" : "a decrease"} of ${_fmt(Math.abs(b), 4)} in <code>${m.spec.response}</code>.`,
+                });
+              } else {
+                out.push({
+                  severity: "note",
+                  text: `<code>${name}</code> is <strong>not</strong> statistically significant (β = ${_fmt(b, 4)}, p = ${_fmtP(p)}). The data do not provide evidence of an effect after adjusting for the other predictors. Do not interpret its sign.`,
+                });
+              }
+            }
+            return out;
+          },
+        },
+
+        /* ---- Section: assumption checks ---- */
+        {
+          id: "vif_severe", section: "assumptions", severity: "critical",
+          applies: (m) => m.diagnostics && m.diagnostics.vif && m.diagnostics.vif.some((v) => v != null && v > 10),
+          render:  (m) => {
+            const offenders = m.diagnostics.vif
+              .map((v, i) => ({ v, name: m.spec.predictorNames[i] }))
+              .filter((x) => x.v != null && x.v > 10)
+              .sort((a, b) => b.v - a.v)
+              .slice(0, 4);
+            const list = offenders.map((o) => `<code>${o.name}</code> = ${_fmt(o.v, 1)}`).join(", ");
+            return `<strong>Severe multicollinearity</strong>: VIF for ${list}. Coefficient estimates and p-values for these variables are unreliable. Consider dropping one, combining them, or using a regularised model.`;
+          },
+        },
+        {
+          id: "vif_moderate", section: "assumptions", severity: "warn",
+          applies: (m) => m.diagnostics && m.diagnostics.vif && m.diagnostics.vif.some((v) => v != null && v >= 5 && v <= 10) && !m.diagnostics.vif.some((v) => v != null && v > 10),
+          render:  (m) => {
+            const offenders = m.diagnostics.vif
+              .map((v, i) => ({ v, name: m.spec.predictorNames[i] }))
+              .filter((x) => x.v != null && x.v >= 5)
+              .sort((a, b) => b.v - a.v)
+              .slice(0, 4);
+            const list = offenders.map((o) => `<code>${o.name}</code> = ${_fmt(o.v, 1)}`).join(", ");
+            return `Moderate multicollinearity (VIF in [5, 10]): ${list}. Coefficients are inflated; interpret with caution.`;
+          },
+        },
+        {
+          id: "bp_failed", section: "assumptions", severity: "warn",
+          applies: (m) => m.diagnostics && m.diagnostics.bp && m.diagnostics.bp.p < 0.05,
+          render:  (m) => `Breusch-Pagan rejects homoscedasticity (LM = ${_fmt(m.diagnostics.bp.stat, 3)}, df = ${m.diagnostics.bp.df}, p = ${_fmtP(m.diagnostics.bp.p)}). Residual variance grows with the fitted values; classical standard errors and p-values are biased. Consider HC3 robust SEs (toggle <em>Robust SE</em> and refit) or a log/sqrt transform of the response.`,
+        },
+        {
+          id: "normality_failed", section: "assumptions", severity: "warn",
+          applies: (m) => m.diagnostics && (
+            (m.diagnostics.sw && m.diagnostics.sw.p < 0.05) ||
+            (m.diagnostics.jb && m.diagnostics.jb.p < 0.05)
+          ),
+          render:  (m) => {
+            const sw = m.diagnostics.sw, jb = m.diagnostics.jb;
+            const swPart = sw ? `Shapiro-Wilk W = ${_fmt(sw.stat, 4)} (p = ${_fmtP(sw.p)})` : null;
+            const jbPart = jb ? `Jarque-Bera = ${_fmt(jb.stat, 3)} (p = ${_fmtP(jb.p)})` : null;
+            const both = [swPart, jbPart].filter(Boolean).join("; ");
+            const cautious = m.spec.n < 30 ? "With small n the t-tests rely heavily on this assumption — treat marginal p-values (0.01 &lt; p &lt; 0.10) with caution." : "With moderate-to-large n the central limit theorem helps the F-test, but coefficient CIs may still be off. ";
+            return `Residuals are <strong>not normally distributed</strong> (${both}). ${cautious} Inspect the Q-Q plot and consider transforming the response or using bootstrap CIs.`;
+          },
+        },
+        {
+          id: "dw_autocorr", section: "assumptions", severity: "warn",
+          applies: (m) => m.diagnostics && Number.isFinite(m.diagnostics.durbinWatson) &&
+                          (m.diagnostics.durbinWatson < 1.5 || m.diagnostics.durbinWatson > 2.5),
+          render:  (m) => {
+            const dw = m.diagnostics.durbinWatson;
+            const dir = dw < 1.5 ? "positive" : "negative";
+            return `Durbin-Watson = ${_fmt(dw, 3)} indicates <strong>${dir} residual autocorrelation</strong> (rule-of-thumb thresholds 1.5 / 2.5). If observations are time-ordered, classical SEs are too small. Consider HAC (Newey-West) SEs or model the time structure explicitly.`;
+          },
+        },
+        {
+          id: "influential_present", section: "assumptions", severity: "warn",
+          applies: (m) => m.diagnostics && m.diagnostics.influentialIdx && m.diagnostics.influentialIdx.length > 0,
+          render:  (m) => {
+            const k = m.diagnostics.influentialIdx.length;
+            const top = m.diagnostics.influentialIdx
+              .slice()
+              .sort((a, b) => m.diagnostics.cooks[b] - m.diagnostics.cooks[a])
+              .slice(0, 8)
+              .map((i) => `${i + 1}`)
+              .join(", ");
+            return `${k} observation${k === 1 ? "" : "s"} exceed${k === 1 ? "s" : ""} Cook's threshold (4/n = ${_fmt(m.diagnostics.cookThreshold, 4)}): row${k === 1 ? "" : "s"} ${top}${k > 8 ? ", …" : ""}. Refit excluding ${k === 1 ? "this row" : "these rows"} and compare β to gauge how much they drive the result.`;
+          },
+        },
+        {
+          id: "anscombe_pattern", section: "assumptions", severity: "warn",
+          applies: (m) => {
+            if (m.family === "logistic") return false;
+            const c = _curvature(m);
+            return c && c.p < 0.05;
+          },
+          render:  (m) => {
+            const c = _curvature(m);
+            return `Residuals are <strong>systematically curved</strong> against fitted values — the quadratic-of-fitted coefficient is significant (t = ${_fmt(c.t, 3)}, p = ${_fmtP(c.p)}) in an auxiliary regression of residuals on fitted + fitted². The linear fit's R² and per-predictor t-tests can't see this. Inspect Residuals-vs-Fitted, then try <em>family = polynomial</em> or a log / sqrt transform of the response.`;
+          },
+        },
+
+        /* ---- Section: recommendations.  This is a "macro" rule that
+               looks at which other rules fired and emits 1+ targeted
+               next steps. Always evaluated last. */
+        {
+          id: "recommendations", section: "recommend", severity: "info",
+          applies: () => true,           // gate handled by render's _firedRules check
+          render:  (m) => {
+            const fired = m._firedRules || new Set();
+            const recs = [];
+            if (fired.has("bp_failed") && !m.robustSE) {
+              recs.push({ severity: "note", text: `Toggle <strong>Robust SE (HC3)</strong> in the sidebar and refit — the heteroscedasticity-consistent inference is what you want here.` });
+            }
+            if (fired.has("influential_present")) {
+              const top = m.diagnostics.influentialIdx
+                .slice().sort((a, b) => m.diagnostics.cooks[b] - m.diagnostics.cooks[a])
+                .slice(0, 5).map((i) => i + 1).join(", ");
+              recs.push({ severity: "note", text: `Refit the model excluding the most influential row${m.diagnostics.influentialIdx.length === 1 ? "" : "s"} (${top}) and compare β. Stability of estimates under exclusion is the standard sensitivity check.` });
+            }
+            if (fired.has("vif_severe")) {
+              recs.push({ severity: "warn", text: `Drop or combine the highest-VIF predictor before reading the coefficient table. Their individual β estimates are essentially noise at this level of collinearity.` });
+            }
+            if (fired.has("anscombe_pattern")) {
+              recs.push({ severity: "note", text: `Try <em>family = polynomial</em> or apply a <em>log / sqrt</em> transform to the response (sidebar) — the residual curvature suggests the linear functional form is inadequate.` });
+            }
+            if (fired.has("normality_failed") && m.spec.n < 30) {
+              recs.push({ severity: "note", text: `With n &lt; 30 and non-normal residuals, classical t-CIs are unreliable. A response transform (log / sqrt) often fixes this.` });
+            }
+            if (fired.has("f_test_failed")) {
+              recs.push({ severity: "critical", text: `Stop interpreting individual coefficients. The model as a whole isn't predictive — find better predictors.` });
+            }
+            if (recs.length === 0) {
+              recs.push({ severity: "info", text: `No major issues flagged. Consider hold-out validation, predicting on new data (Predictions tab), and a brief sensitivity check by refitting without high-leverage rows.` });
+            }
+            return recs;
+          },
+        },
+      ];
+
+      /* =========================================================
+                                COMPOSER
+         ========================================================= */
+      function _headline(m, sections, fired) {
+        const slopeCount = (m.spec.predictorNames.length - (m.spec.hasIntercept ? 1 : 0));
+        const sigCount = m.p ? m.p.filter((p, i) => p < 0.05 && (m.spec.hasIntercept ? i > 0 : true)).length : 0;
+        const r2pct = _pct(m.r2);
+        const sigPart = slopeCount > 0 ? ` (${sigCount}/${slopeCount} predictors significant)` : "";
+
+        if (fired.has("f_test_failed")) {
+          return { severity: "critical", text: `Overall fit is not statistically significant — F p = ${_fmtP(m.fPval)}, R² = ${r2pct}. Don't act on individual coefficient p-values.` };
+        }
+        if (fired.has("r2_overfit")) {
+          return { severity: "warn", text: `Suspiciously high R² (${r2pct}) with ${slopeCount} predictors and only ${m.spec.n} observations — likely overfitting.` };
+        }
+        if (fired.has("vif_severe")) {
+          return { severity: "warn", text: `Strong fit (R² = ${r2pct})${sigPart}, but severe multicollinearity makes individual coefficient estimates unreliable.` };
+        }
+        const issues = [];
+        if (fired.has("bp_failed"))            issues.push("heteroscedasticity");
+        if (fired.has("normality_failed"))     issues.push("non-normal residuals");
+        if (fired.has("dw_autocorr"))          issues.push("residual autocorrelation");
+        if (fired.has("influential_present"))  issues.push("influential observations");
+        if (fired.has("anscombe_pattern"))     issues.push("residual curvature");
+        if (issues.length > 0) {
+          return { severity: "warn", text: `R² = ${r2pct}${sigPart}, but ${issues.join(" + ")} detected — interpret coefficients with caution and see the recommendations below.` };
+        }
+        return { severity: "note", text: `Clean fit: R² = ${r2pct}${sigPart}, no major assumption violations flagged.` };
+      }
+
+      /* =========================================================
+                                  RUNNER
+         ========================================================= */
+      function run(model) {
+        const sections = { overall: [], predictors: [], assumptions: [], recommend: [] };
+        if (!model) return Object.assign({ headline: null }, sections);
+
+        const sevOrder = { critical: 0, warn: 1, note: 2, info: 3 };
+        const fired = new Set();
+
+        // First pass: every rule except 'recommendations' (which needs to know what fired).
+        for (const rule of RULES) {
+          if (rule.id === "recommendations") continue;
+          let ok;
+          try { ok = rule.applies(model); } catch (e) { console.warn("[interp]", rule.id, "applies threw:", e); ok = false; }
+          if (!ok) continue;
+          fired.add(rule.id);
+          let result;
+          try { result = rule.render(model); } catch (e) { console.warn("[interp]", rule.id, "render threw:", e); continue; }
+          const items = Array.isArray(result) ? result : [{ severity: rule.severity, text: result }];
+          for (const item of items) {
+            sections[rule.section].push({
+              ruleId: rule.id,
+              severity: item.severity || rule.severity,
+              text: item.text,
+            });
+          }
+        }
+
+        // Second pass: recommendations rule, given fired set.
+        model._firedRules = fired;
+        const rec = RULES.find((r) => r.id === "recommendations");
+        const recItems = rec.render(model);
+        for (const item of recItems) {
+          sections.recommend.push({ ruleId: rec.id, severity: item.severity, text: item.text });
+        }
+        delete model._firedRules;
+
+        // Sort each section by severity descending (critical first).
+        for (const k of Object.keys(sections)) {
+          sections[k].sort((a, b) => sevOrder[a.severity] - sevOrder[b.severity]);
+        }
+
+        const headline = _headline(model, sections, fired);
+        return { headline, ...sections };
+      }
+
+      return { RULES, run };
     })();
 
     const Report = (function () {
