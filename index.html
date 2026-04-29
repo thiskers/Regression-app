@@ -863,7 +863,7 @@
           { mpg:30.4, cyl:4, disp: 95.1, hp:113, drat:3.77, wt:1.513, qsec:16.90, vs:1, am:1, gear:5, carb:2 },
           { mpg:15.8, cyl:8, disp:351.0, hp:264, drat:4.22, wt:3.170, qsec:14.50, vs:0, am:1, gear:5, carb:4 },
           { mpg:19.7, cyl:6, disp:145.0, hp:175, drat:3.62, wt:2.770, qsec:15.50, vs:0, am:1, gear:5, carb:6 },
-          { mpg:15.0, cyl:8, disp:301.0, hp:167, drat:3.54, wt:3.570, qsec:14.60, vs:0, am:1, gear:5, carb:8 },
+          { mpg:15.0, cyl:8, disp:301.0, hp:335, drat:3.54, wt:3.570, qsec:14.60, vs:0, am:1, gear:5, carb:8 },
           { mpg:21.4, cyl:4, disp:121.0, hp:109, drat:4.11, wt:2.780, qsec:18.60, vs:1, am:1, gear:4, carb:2 },
         ],
       },
@@ -1435,11 +1435,269 @@
       };
     })();
 
+    /* ===== 3. Stats =====
+       Design-matrix builder + OLS fitter (QR-based) with full classical
+       inference. Logistic (IRLS) lands in Step 13. */
     const Stats = (function () {
+
+      /* ---- bisection inverse of tCDF (NumLib has CDFs but no inverses) ----
+         Used for confidence-interval critical values when df is finite.
+         Returns t such that tCDF(t, df) = p. Converges to 1e-9 in ~30
+         iterations across the practical range. */
+      function tInverse(p, df) {
+        if (p <= 0) return -Infinity;
+        if (p >= 1) return  Infinity;
+        if (df > 1000) return NumLib.normInv(p);             // normal limit
+        let lo = -50, hi = 50;
+        for (let i = 0; i < 60; i++) {
+          const mid = (lo + hi) / 2;
+          if (NumLib.tCDF(mid, df) < p) lo = mid; else hi = mid;
+          if (hi - lo < 1e-9) break;
+        }
+        return (lo + hi) / 2;
+      }
+
+      /* ---- buildDesign(rows, spec) ----
+         Turns a row-of-objects dataset + a variable spec into the design
+         matrix X, response vector y, and column names. Handles:
+           - listwise / mean / median missing-data policies
+           - dummy encoding for string predictors (with reference level)
+           - variable transforms: log / sqrt / square / standardize
+           - polynomial expansion when family='polynomial' and 1 predictor
+           - intercept column when spec.intercept is true
+         Logistic-specific binary encoding (string → 0/1 response) is
+         deferred to Step 13's fitLogistic. */
+      function buildDesign(rows, spec) {
+        const responseName = spec.response;
+        const predictorNames = (spec.predictors || []).slice();
+        if (!responseName) throw new Error("No response variable selected.");
+        if (predictorNames.length === 0) throw new Error("No predictor variables selected.");
+
+        const isMissing = (v) =>
+          v === null || v === undefined || v === "" ||
+          (typeof v === "number" && Number.isNaN(v));
+
+        // Column type inference (numeric vs string).
+        const colType = (name) => {
+          for (const r of rows) {
+            const v = r[name];
+            if (isMissing(v)) continue;
+            return typeof v === "number" ? "numeric" : "string";
+          }
+          return "numeric";
+        };
+        const types = {};
+        for (const n of [responseName, ...predictorNames]) types[n] = colType(n);
+
+        // Missing-data handling.
+        const policy = spec.missingPolicy || "listwise";
+        let validIdx = [];
+        const dropped = [];
+        if (policy === "listwise") {
+          for (let i = 0; i < rows.length; i++) {
+            let drop = false;
+            for (const n of [responseName, ...predictorNames]) {
+              if (isMissing(rows[i][n])) { drop = true; break; }
+            }
+            (drop ? dropped : validIdx).push(i);
+          }
+        } else {
+          validIdx = rows.map((_, i) => i);
+        }
+
+        // For mean/median imputation, substitute on numeric predictors only.
+        const imputed = {};
+        if (policy === "mean" || policy === "median") {
+          for (const n of [responseName, ...predictorNames]) {
+            if (types[n] !== "numeric") continue;
+            const vals = rows.map((r) => r[n]).filter((v) => !isMissing(v));
+            const v = policy === "mean"
+              ? vals.reduce((a, b) => a + b, 0) / vals.length
+              : NumLib.quantile(vals, 0.5);
+            imputed[n] = v;
+          }
+        }
+        const valueAt = (i, name) => {
+          const v = rows[i][name];
+          return isMissing(v) ? (imputed[name] !== undefined ? imputed[name] : NaN) : v;
+        };
+
+        // Build y. Response must be numeric for OLS; logistic relaxes this in Step 13.
+        if (types[responseName] !== "numeric" && spec.family !== "logistic") {
+          throw new Error(`Response "${responseName}" is not numeric — for binary outcomes switch family to logistic.`);
+        }
+        const y = validIdx.map((i) => valueAt(i, responseName));
+
+        // Build X column-by-column with encoding / transforms.
+        const xCols = [];
+        for (const name of predictorNames) {
+          const colVals = validIdx.map((i) => rows[i][name]);
+          if (types[name] === "string") {
+            const unique = Array.from(new Set(colVals.filter((v) => !isMissing(v)))).sort();
+            const ref = (spec.referenceLevels && spec.referenceLevels[name]) || unique[0];
+            for (const lvl of unique) {
+              if (lvl === ref) continue;
+              xCols.push({
+                name: `${name}=${lvl}`,
+                values: colVals.map((v) => (v === lvl ? 1 : 0)),
+              });
+            }
+          } else {
+            let vals = validIdx.map((i) => valueAt(i, name));
+            const t = (spec.transforms && spec.transforms[name]) || "none";
+            let label = name;
+            if (t === "log")        { vals = vals.map((v) => Math.log(v));   label = `log(${name})`; }
+            else if (t === "sqrt")  { vals = vals.map((v) => Math.sqrt(v));  label = `sqrt(${name})`; }
+            else if (t === "square"){ vals = vals.map((v) => v * v);          label = `${name}²`; }
+            if (spec.standardize) {
+              const m = NumLib.mean(vals), s = NumLib.sd(vals);
+              vals = vals.map((v) => (v - m) / s);
+              label = `std(${label})`;
+            }
+            xCols.push({ name: label, values: vals });
+          }
+        }
+
+        // Polynomial expansion: only when exactly one numeric predictor.
+        if (spec.family === "polynomial" && xCols.length === 1 &&
+            spec.polynomialDegree && spec.polynomialDegree >= 2) {
+          const base = xCols[0];
+          const baseLabel = base.name;
+          for (let d = 2; d <= spec.polynomialDegree; d++) {
+            xCols.push({ name: `${baseLabel}^${d}`, values: base.values.map((v) => Math.pow(v, d)) });
+          }
+        }
+
+        // Intercept column.
+        if (spec.intercept !== false) {
+          xCols.unshift({ name: "(Intercept)", values: validIdx.map(() => 1) });
+        }
+
+        // Stitch into 2D row-major X.
+        const X = validIdx.map((_, ri) => xCols.map((c) => c.values[ri]));
+
+        const warnings = [];
+        if (dropped.length > 0) {
+          warnings.push(`Listwise deletion dropped ${dropped.length} of ${rows.length} rows due to missing values.`);
+        }
+        if (X.length <= xCols.length) {
+          throw new Error(`Only ${X.length} usable rows after preprocessing — need more than ${xCols.length} for ${xCols.length} predictors.`);
+        }
+        return {
+          X, y,
+          names: xCols.map((c) => c.name),
+          response: responseName,
+          dropped: dropped.length,
+          warnings,
+        };
+      }
+
+      /* ---- fitOLS(X, y, opts) ----
+         Solves β̂ = (X′X)⁻¹ X′y via QR decomposition (numerically stable
+         for ill-conditioned design matrices — required to pass NIST
+         StRD's Filip / Longley benchmarks in Step 15). Returns the full
+         model payload with residual / inference quantities. */
+      function fitOLS(X, y, opts) {
+        if (typeof window.mlMatrix === "undefined") {
+          throw new Error("ml-matrix CDN not loaded.");
+        }
+        const M  = window.mlMatrix.Matrix;
+        const QR = window.mlMatrix.QrDecomposition;
+        const inv = window.mlMatrix.inverse;
+
+        const n = X.length;
+        const p = X[0].length;
+        if (n <= p) throw new Error(`Cannot fit: n (${n}) ≤ p (${p}).`);
+
+        const Xm = new M(X);
+        const ym = M.columnVector(y);
+
+        // QR-based least-squares solve. Never normal equations: that costs
+        // ~half the digits of accuracy on ill-conditioned X′X.
+        const qr = new QR(Xm);
+        const betaM = qr.solve(ym);
+        const beta  = betaM.to1DArray();
+
+        const fitted    = Xm.mmul(betaM).to1DArray();
+        const residuals = y.map((yi, i) => yi - fitted[i]);
+        const rss = residuals.reduce((s, r) => s + r * r, 0);
+        const yMean = NumLib.mean(y);
+        const tss = y.reduce((s, yi) => s + (yi - yMean) ** 2, 0);
+
+        const dof = n - p;                      // residual degrees of freedom
+        const sigma2 = rss / dof;
+        const rmse   = Math.sqrt(sigma2);
+        const r2     = tss > 0 ? 1 - rss / tss : NaN;
+        const adjR2  = tss > 0 ? 1 - (1 - r2) * (n - 1) / dof : NaN;
+
+        // Log-likelihood (Gaussian MLE), AIC, BIC.
+        const logLik = -n / 2 * (Math.log(2 * Math.PI) + Math.log(rss / n) + 1);
+        const k = p + 1;                        // free params: β + σ²
+        const aic = -2 * logLik + 2 * k;
+        const bic = -2 * logLik + Math.log(n) * k;
+
+        // (X′X)⁻¹ for SEs.  We have R from QR (X = QR), so XtX = R′R and
+        // (XtX)⁻¹ = R⁻¹ R⁻ᵀ would be the stable path. For now we form
+        // X′X explicitly — accurate enough at the SE digit count we
+        // report (4–6 sig figs); will revisit in Step 15 if NIST self-test
+        // exposes precision loss.
+        const XtX    = Xm.transpose().mmul(Xm);
+        const XtXinv = inv(XtX);
+        const seBeta = [];
+        for (let i = 0; i < p; i++) seBeta.push(Math.sqrt(XtXinv.get(i, i) * sigma2));
+
+        // t-stats, two-sided p-values, CIs (using df-aware t-quantile).
+        const tStats   = beta.map((b, i) => b / seBeta[i]);
+        const pValues  = tStats.map((t)   => NumLib.tPvalue2(t, dof));
+        const alpha    = 1 - (opts.ciLevel || 0.95);
+        const tCrit    = tInverse(1 - alpha / 2, dof);
+        const ci       = beta.map((b, i) => [b - tCrit * seBeta[i], b + tCrit * seBeta[i]]);
+
+        // Standardized β: β_j × sd(X_j) / sd(y).  Intercept is null.
+        const sdY = Math.sqrt(tss / (n - 1));
+        const stdBeta = beta.map((b, i) => {
+          if (opts.intercept !== false && i === 0) return null;
+          const col = Xm.getColumn(i);
+          const sdX = NumLib.sd(col);
+          return sdX === 0 ? null : (b * sdX) / sdY;
+        });
+
+        // Overall F-test: H₀ — all slopes = 0.  pPred = #real predictors.
+        const hasIntercept = opts.intercept !== false;
+        const pPred = hasIntercept ? p - 1 : p;
+        let fStat = NaN, fPval = NaN;
+        if (pPred > 0 && hasIntercept) {
+          const mss = tss - rss;
+          fStat = (mss / pPred) / sigma2;
+          fPval = 1 - NumLib.fCDF(fStat, pPred, dof);
+        }
+
+        return {
+          family: "ols",
+          fittedAt: new Date().toISOString(),
+          spec: {
+            response: opts.response,
+            predictorNames: opts.names,
+            hasIntercept,
+            n, p,
+          },
+          beta, se: seBeta, t: tStats, p: pValues, ci, betaStd: stdBeta,
+          fitted, residuals,
+          rss, tss, mss: tss - rss, sigma2, rmse,
+          r2, adjR2, aic, bic, logLik,
+          fStat, fDf1: pPred, fDf2: dof, fPval,
+          dropped: opts.dropped || 0,
+          warnings: (opts.warnings || []).slice(),
+          diagnostics: {},   // filled by Diag.compute (Step 9)
+          interp: null,      // filled by Interpret.run (Step 12)
+        };
+      }
+
       return {
-        buildDesign: _NI("Stats.buildDesign", 8),
-        fitOLS:      _NI("Stats.fitOLS",      8),
+        buildDesign,
+        fitOLS,
         fitLogistic: _NI("Stats.fitLogistic", 13),
+        _internal: { tInverse },
       };
     })();
 
@@ -1785,6 +2043,8 @@
               tol:       this.config.tol,
               names:     design.names,
               response:  this.spec.response,
+              dropped:   design.dropped,
+              warnings:  design.warnings,
             });
             Diag.compute(model);
             model.interp = Interpret.run(model);
