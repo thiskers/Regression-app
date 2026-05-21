@@ -1425,6 +1425,26 @@
       </div>
     </div>
 
+    <!-- Errors toast. Surfaces anything pushed to errors[] by
+         _reportError so the user actually sees the failure (fit crash,
+         transform-domain violation, perfect collinearity, etc.) rather
+         than reading the JS console. Click × to dismiss. -->
+    <div class="toast error" x-show="errors.length > 0" x-cloak
+         style="display: flex; gap: 0.75rem; align-items: flex-start">
+      <div style="flex: 1">
+        <strong style="display: block; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--sev-critical-fg); margin-bottom: 0.25rem">
+          <span x-text="errors.length === 1 ? 'Error' : (errors.length + ' errors')"></span>
+        </strong>
+        <template x-for="(err, i) in errors.slice(-3)" :key="i">
+          <p style="margin: 0 0 0.25rem 0; font-size: 0.85rem; line-height: 1.4" x-text="err.msg"></p>
+        </template>
+      </div>
+      <button class="secondary"
+              @click="errors = []"
+              style="margin: 0; padding: 0.15rem 0.45rem; font-size: 1rem; line-height: 1; align-self: flex-start"
+              aria-label="Dismiss errors">×</button>
+    </div>
+
     <!-- Tutorial spotlight overlay. The pointer-events:none container
          lets clicks pass through to the highlighted control. The
          popover absorbs its own clicks. -->
@@ -2319,11 +2339,33 @@
             let vals = validIdx.map((i) => valueAt(i, name));
             const t = (spec.transforms && spec.transforms[name]) || "none";
             let label = name;
-            if (t === "log")        { vals = vals.map((v) => Math.log(v));   label = `log(${name})`; }
-            else if (t === "sqrt")  { vals = vals.map((v) => Math.sqrt(v));  label = `sqrt(${name})`; }
-            else if (t === "square"){ vals = vals.map((v) => v * v);          label = `${name}²`; }
+            if (t === "log") {
+              // log requires strictly positive values; surface the
+              // domain violation up front rather than producing −∞ / NaN
+              // that silently propagates through QR and lands on the
+              // user as "model fit didn't return numbers."
+              if (vals.some((v) => !(v > 0))) {
+                const mn = Math.min(...vals.filter(Number.isFinite));
+                throw new Error(`Cannot apply log transform to "${name}": column contains non-positive values (min = ${mn}). Choose sqrt / square / a different transform, or filter the data.`);
+              }
+              vals = vals.map((v) => Math.log(v));
+              label = `log(${name})`;
+            } else if (t === "sqrt") {
+              if (vals.some((v) => v < 0)) {
+                const mn = Math.min(...vals.filter(Number.isFinite));
+                throw new Error(`Cannot apply sqrt transform to "${name}": column contains negative values (min = ${mn}).`);
+              }
+              vals = vals.map((v) => Math.sqrt(v));
+              label = `sqrt(${name})`;
+            } else if (t === "square") {
+              vals = vals.map((v) => v * v);
+              label = `${name}²`;
+            }
             if (spec.standardize) {
               const m = NumLib.mean(vals), s = NumLib.sd(vals);
+              if (!(s > 0)) {
+                throw new Error(`Cannot standardise "${name}": column has zero variance (all values are ${m}). Drop this predictor or turn off Standardise.`);
+              }
               vals = vals.map((v) => (v - m) / s);
               label = `std(${label})`;
             }
@@ -2382,6 +2424,27 @@
         };
       }
 
+      /* ---- _findPerfectCollinearity(X, names)
+         When inv(X'X) throws, walk the columns looking for a pair whose
+         Pearson correlation is ±1 (or close enough). Returns a short
+         human-readable description of the offender for the error message;
+         null if no obvious pair (e.g. three-column rank deficiency). */
+      function _findPerfectCollinearity(X, names) {
+        if (!X || !X[0] || X[0].length < 2) return null;
+        const p = X[0].length;
+        const cols = [];
+        for (let j = 0; j < p; j++) cols.push(X.map((r) => r[j]));
+        for (let i = 1; i < p; i++) {           // skip intercept column at 0
+          for (let j = i + 1; j < p; j++) {
+            const r = NumLib.pearsonR(cols[i], cols[j]);
+            if (Number.isFinite(r) && Math.abs(r) > 1 - 1e-9) {
+              return `"${(names && names[i]) || ("x" + i)}" and "${(names && names[j]) || ("x" + j)}" are perfectly correlated (r = ${r.toFixed(3)})`;
+            }
+          }
+        }
+        return null;
+      }
+
       /* ---- fitOLS(X, y, opts) ----
          Solves β̂ = (X′X)⁻¹ X′y via QR decomposition (numerically stable
          for ill-conditioned design matrices — required to pass NIST
@@ -2432,7 +2495,17 @@
         // report (4–6 sig figs); will revisit in Step 15 if NIST self-test
         // exposes precision loss.
         const XtX    = Xm.transpose().mmul(Xm);
-        const XtXinv = inv(XtX);
+        let XtXinv;
+        try {
+          XtXinv = inv(XtX);
+        } catch (e) {
+          // ml-matrix throws "LU matrix is singular" / similar when two
+          // or more design columns are linearly dependent. Rewrap with a
+          // message the user can act on, naming the most-likely culprit.
+          const dup = _findPerfectCollinearity(X, opts.names);
+          const hint = dup ? ` Likely culprit: ${dup}.` : "";
+          throw new Error(`Cannot compute coefficient standard errors — design matrix X is rank-deficient (perfect collinearity between predictors).${hint} Drop one of the offending columns and refit.`);
+        }
         const seBeta = [];
         for (let i = 0; i < p; i++) seBeta.push(Math.sqrt(XtXinv.get(i, i) * sigma2));
 
@@ -2557,6 +2630,16 @@
 
         const n = X.length, p = X[0].length;
         if (n <= p) throw new Error(`Cannot fit logistic: n (${n}) ≤ p (${p}).`);
+
+        // Degenerate response check: if every y_i is 0 (or every y_i is 1)
+        // there is no variation to model. IRLS would converge to a flat
+        // (intercept-only) curve with AUC = 0.5, which the user would
+        // mistake for "model worked." Refuse early.
+        const positives = y.reduce((s, v) => s + (v === 1 ? 1 : 0), 0);
+        if (positives === 0 || positives === n) {
+          const cls = positives === 0 ? "negative" : "positive";
+          throw new Error(`Cannot fit logistic: response is entirely ${cls} class (no variation). At least one observation in each class is required.`);
+        }
 
         const maxIter = opts.maxIter || 50;
         const tol     = opts.tol     || 1e-8;
